@@ -108,11 +108,47 @@ Create `config/models.json` with your model configurations:
 
 ### Environment Variables
 
+#### Basic Configuration
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `43886` | Proxy server port |
 | `BUFFER_SIZE` | `1` | Records to buffer before writing (1 = immediate) |
 | `TIME_WINDOW_MINUTES` | `30` | Minutes between creating new Parquet files |
+| `FLUSH_INTERVAL_SECONDS` | `1800` | Periodic flush interval in seconds (0 = disabled) |
+
+#### Model Configuration (Environment-based)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TARGET_MODEL` | Yes | Target model name for training |
+| `ORIGIN_MODEL` | Yes | Original upstream model name |
+| `API_MODE` | Yes | Original API type (e.g., `openai`, `anthropic`, `custom`) |
+| `API_URL` | No | Custom API base URL (overrides default) |
+| `ACCESS_KEY` | Yes | API access key |
+
+#### Batch Mode (Rolling Window)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TRAJECTORY_BUFFER_SIZE` | No | Total records to retain (0 = disabled, enables batch mode) |
+
+When `TRAJECTORY_BUFFER_SIZE` is set, data is stored in rolling batches. Old data is automatically deleted when the limit is exceeded.
+
+**Example using environment variables:**
+
+```bash
+export TARGET_MODEL="my-model"
+export ORIGIN_MODEL="gpt-4"
+export API_MODE="openai"
+export API_URL="https://api.example.com/v1"
+export ACCESS_KEY="sk-xxx"
+export BUFFER_SIZE=100
+export TRAJECTORY_BUFFER_SIZE=10000
+export FLUSH_INTERVAL_SECONDS=300
+
+python scripts/serve.py
+```
 
 ## Usage
 

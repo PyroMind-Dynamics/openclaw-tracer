@@ -108,11 +108,47 @@ docker-compose up -d
 
 ### 环境变量
 
+#### 基础配置
+
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `PORT` | `43886` | 代理服务器端口 |
 | `BUFFER_SIZE` | `1` | 写入前缓冲的记录数 (1 = 立即写入) |
 | `TIME_WINDOW_MINUTES` | `30` | 创建新 Parquet 文件的间隔分钟数 |
+| `FLUSH_INTERVAL_SECONDS` | `1800` | 定时 flush 间隔秒数 (0 = 禁用) |
+
+#### 模型配置（基于环境变量）
+
+| 变量 | 是否必填 | 说明 |
+|------|----------|------|
+| `TARGET_MODEL` | 是 | 要训练的目标模型名称 |
+| `ORIGIN_MODEL` | 是 | 原始上游模型名称 |
+| `API_MODE` | 是 | 原始 API 类型 (如 `openai`、`anthropic`、`custom`) |
+| `API_URL` | 否 | 自定义 API 基础 URL (覆盖默认值) |
+| `ACCESS_KEY` | 是 | API 访问密钥 |
+
+#### 批处理模式（滚动窗口）
+
+| 变量 | 是否必填 | 说明 |
+|------|----------|------|
+| `TRAJECTORY_BUFFER_SIZE` | 否 | 保留的总记录数 (0 = 禁用，启用批处理模式) |
+
+当设置 `TRAJECTORY_BUFFER_SIZE` 时，数据将以滚动批次方式存储。超过限制时，旧数据会自动删除。
+
+**使用环境变量示例：**
+
+```bash
+export TARGET_MODEL="my-model"
+export ORIGIN_MODEL="gpt-4"
+export API_MODE="openai"
+export API_URL="https://api.example.com/v1"
+export ACCESS_KEY="sk-xxx"
+export BUFFER_SIZE=100
+export TRAJECTORY_BUFFER_SIZE=10000
+export FLUSH_INTERVAL_SECONDS=300
+
+python scripts/serve.py
+```
 
 ## 使用方法
 
