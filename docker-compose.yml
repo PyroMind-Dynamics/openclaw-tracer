@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  openclaw-tracer:
+    image: ${DOCKER_USERNAME:-openclawtracer}/openclaw-tracer:${VERSION:-latest}
+    container_name: openclaw-tracer
+    restart: unless-stopped
+
+    # 端口映射
+    ports:
+      - "${HOST_PORT:-43886}:${PORT:-43886}"
+
+    # 环境变量
+    environment:
+      - PORT=${PORT:-43886}
+      - BUFFER_SIZE=${BUFFER_SIZE:-1}
+      - TIME_WINDOW_MINUTES=${TIME_WINDOW_MINUTES:-30}
+
+    # 挂载卷
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:43886/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G

@@ -1,0 +1,10 @@
+data/*
+logs/*
+.Dockerfile.swp
+CLAUDE.md
+__pycache__/*
+.cursor/*
+docs/*
+config/models.json
+.DS_Store
+config/models.json

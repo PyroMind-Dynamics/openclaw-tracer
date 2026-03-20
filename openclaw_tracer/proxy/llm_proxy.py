@@ -1,0 +1,1063 @@
+# Copyright (c) 2025 OpenClaw-Tracer
+# LiteLLM proxy server for data collection
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+from uuid import uuid4
+
+from litellm.integrations.custom_logger import CustomLogger
+from litellm.proxy.proxy_server import app, save_worker_config
+try:
+    from portpicker import pick_unused_port
+except ImportError:
+    # Fallback to simple port selection
+    def pick_unused_port():
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+        return port
+
+from openclaw_tracer.storage.base import StorageBackend
+from openclaw_tracer.storage.parquet_store import ParquetStore
+from openclaw_tracer.types.core import (
+    Attributes,
+    Resource,
+    Span,
+    SpanContext,
+    SpanKind,
+    StatusCode,
+)
+
+logger = logging.getLogger(__name__)
+
+# Setup diagnostic logger for response debugging
+diagnostic_logger = logging.getLogger("diagnostic")
+diagnostic_logger.setLevel(logging.INFO)
+if not diagnostic_logger.handlers:
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    # Add file handler for diagnostic logs
+    diagnostic_handler = logging.FileHandler(log_dir / "diagnostic.log")
+    diagnostic_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    diagnostic_handler.setFormatter(formatter)
+    diagnostic_logger.addHandler(diagnostic_handler)
+
+
+class HTTPAccessLogger:
+    """Middleware to log all HTTP requests and responses to a file.
+
+    Logs include:
+    - Timestamp
+    - Request method, path, headers, body
+    - Response status, headers, body
+    - Processing duration
+    """
+
+    def __init__(self, log_file: str | None = None):
+        """Initialize the HTTP access logger.
+
+        Args:
+            log_file: Path to the log file. If None, logs to stdout.
+        """
+        self.log_file = Path(log_file) if log_file else None
+        self._lock = asyncio.Lock()
+        self._request_contexts: Dict[str, Dict[str, Any]] = {}
+
+        # Create log file directory if needed
+        if self.log_file:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    async def log_request(
+        self,
+        method: str,
+        path: str,
+        headers: Dict[str, str],
+        body: str | None = None,
+    ) -> str:
+        """Log an incoming HTTP request.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            path: Request path
+            headers: Request headers
+            body: Request body (if any)
+
+        Returns:
+            Request ID for correlating with response
+        """
+        request_id = uuid4().hex[:16]
+        timestamp = datetime.utcnow().isoformat()
+
+        log_entry = {
+            "type": "request",
+            "request_id": request_id,
+            "timestamp": timestamp,
+            "method": method,
+            "path": path,
+            "headers": dict(headers) if headers else {},
+            "body": body,
+        }
+
+        # Store context for response correlation
+        self._request_contexts[request_id] = {
+            "start_time": timestamp,
+            "method": method,
+            "path": path,
+        }
+
+        await self._write_log(log_entry)
+        return request_id
+
+    async def log_response(
+        self,
+        request_id: str,
+        status_code: int,
+        headers: Dict[str, str],
+        body: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Log an HTTP response.
+
+        Args:
+            request_id: Correlation ID from request
+            status_code: HTTP status code
+            headers: Response headers
+            body: Response body (if any)
+            error: Error message (if request failed)
+        """
+        timestamp = datetime.utcnow().isoformat()
+        context = self._request_contexts.get(request_id, {})
+
+        log_entry = {
+            "type": "response",
+            "request_id": request_id,
+            "timestamp": timestamp,
+            "status_code": status_code,
+            "headers": dict(headers) if headers else {},
+            "body": body,
+            "error": error,
+            "request_method": context.get("method"),
+            "request_path": context.get("path"),
+            "duration_ms": self._calculate_duration(
+                context.get("start_time"), timestamp
+            ) if context.get("start_time") else None,
+        }
+
+        await self._write_log(log_entry)
+
+        # Clean up context
+        self._request_contexts.pop(request_id, None)
+
+    async def log_error(
+        self,
+        method: str,
+        path: str,
+        error: str,
+        headers: Dict[str, str] | None = None,
+    ) -> None:
+        """Log an error without a corresponding request.
+
+        Args:
+            method: HTTP method
+            path: Request path
+            error: Error message
+            headers: Request headers (if available)
+        """
+        timestamp = datetime.utcnow().isoformat()
+
+        log_entry = {
+            "type": "error",
+            "timestamp": timestamp,
+            "method": method,
+            "path": path,
+            "error": error,
+            "headers": dict(headers) if headers else {},
+        }
+
+        await self._write_log(log_entry)
+
+    async def _write_log(self, entry: Dict[str, Any]) -> None:
+        """Write a log entry to file or stdout.
+
+        Args:
+            entry: Log entry dictionary
+        """
+        log_line = json.dumps(entry, ensure_ascii=False) + "\n"
+
+        async with self._lock:
+            if self.log_file:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(log_line)
+            else:
+                print(log_line, end="")
+
+    @staticmethod
+    def _calculate_duration(start: str, end: str) -> float | None:
+        """Calculate duration between two ISO timestamps.
+
+        Args:
+            start: Start timestamp
+            end: End timestamp
+
+        Returns:
+            Duration in milliseconds
+        """
+        try:
+            from datetime import timezone
+            start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+            end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
+            return (end_dt - start_dt).total_seconds() * 1000
+        except Exception:
+            return None
+
+
+def _to_timestamp(value: Union[datetime, float, int, None]) -> Optional[float]:
+    """Convert datetime to Unix timestamp.
+
+    Args:
+        value: datetime object, timestamp (float/int), or None
+
+    Returns:
+        Unix timestamp as float, or None if input is None
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.timestamp()
+    return float(value)
+
+
+def _get_pre_call_data(args: Any, kwargs: Any) -> Dict[str, Any]:
+    """Extract LiteLLM request payload from hook args.
+
+    The LiteLLM logger hooks receive `(*args, **kwargs)` whose third positional
+    argument or `data=` kwarg contains the request payload.
+
+    Args:
+        args: Positional arguments from the hook.
+        kwargs: Keyword arguments from the hook.
+
+    Returns:
+        The request payload dict, or empty dict if not found.
+    """
+    try:
+        if kwargs.get("data"):
+            data = kwargs["data"]
+        elif len(args) >= 3:
+            data = args[2]
+        else:
+            # Return empty dict if we can't find data
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception:
+        # Return empty dict on any error
+        return {}
+
+
+class RequestSanitizer(CustomLogger):
+    """LiteLLM callback to sanitize requests before sending to upstream API.
+
+    Removes parameters that are not supported by certain backends (e.g., vLLM).
+    """
+
+    # Parameters to remove from requests
+    SANITIZED_PARAMS = {"tool_choice", "tools", "tool_use", "parallel_tool_calls"}
+
+    async def async_log_pre_api_call(self, kwargs, **_):
+        """Called before the API request is made.
+
+        Removes unsupported parameters from the request.
+
+        Args:
+            kwargs: The request kwargs that will be sent to the API
+        """
+        # Sanitize the data payload
+        if isinstance(kwargs, dict):
+            # Check for data in kwargs
+            data = kwargs.get("data")
+            if isinstance(data, dict):
+                modified = False
+                original_data = data.copy()
+                for param in self.SANITIZED_PARAMS:
+                    if param in data:
+                        del data[param]
+                        modified = True
+                if modified:
+                    logger.info(f"Sanitized request: removed {self.SANITIZED_PARAMS & set(original_data.keys())} from request")
+
+        return kwargs
+
+
+class SpanLogger(CustomLogger):
+    """LiteLLM logger hook to capture LLM calls as spans.
+
+    This class integrates with LiteLLM's callback system to capture:
+    - Request data (prompts, messages, parameters)
+    - Response data (completions, token IDs, usage)
+    - Timing information
+    - Error information
+
+    All captured data is forwarded to a StorageBackend for persistence.
+    """
+
+    def __init__(self, store: StorageBackend):
+        """Initialize the span logger.
+
+        Args:
+            store: Storage backend for persisting captured data.
+        """
+        super().__init__()
+        self.store = store
+        self._current_spans: Dict[str, Dict[str, Any]] = {}
+
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        """Called when an LLM request succeeds.
+
+        Captures complete conversation data including:
+        - System prompt (separately identified)
+        - Full message history (multi-turn conversations)
+        - Tool calls and tool results (separately identified)
+        - Response content
+        - Usage statistics
+        """
+        try:
+            # Debug: log what we received
+            logger.debug(f"async_log_success_event kwargs type: {type(kwargs)}")
+            logger.debug(f"async_log_success_event kwargs keys: {kwargs.keys() if isinstance(kwargs, dict) else 'not a dict'}")
+            logger.debug(f"async_log_success_event response_obj type: {type(response_obj)}")
+
+            # Extract data from kwargs - LiteLLM passes data in different formats
+            # Try multiple ways to get the request data
+            data = {}
+            messages = []
+
+            # Method 1: Check if kwargs has 'messages' directly (common in proxy mode)
+            if isinstance(kwargs, dict):
+                if "messages" in kwargs:
+                    messages = kwargs["messages"]
+                    data = kwargs
+                    logger.debug(f"Found messages directly in kwargs, count: {len(messages)}")
+                # Method 2: Check for standard litellm keys
+                elif "litellm_params" in kwargs:
+                    litellm_params = kwargs["litellm_params"]
+                    messages = litellm_params.get("messages", [])
+                    data = litellm_params
+                    logger.debug(f"Found messages in litellm_params, count: {len(messages)}")
+                # Method 3: Check for 'data' key
+                elif "data" in kwargs and isinstance(kwargs["data"], dict):
+                    messages = kwargs["data"].get("messages", [])
+                    data = kwargs["data"]
+                    logger.debug(f"Found messages in data, count: {len(messages)}")
+                else:
+                    # Fallback to original method
+                    data = _get_pre_call_data(kwargs, kwargs)
+                    messages = data.get("messages", [])
+                    logger.debug(f"Found messages via _get_pre_call_data, count: {len(messages)}")
+
+            logger.debug(f"Extracted messages: {len(messages)} messages")
+
+            # Extract system prompt (separately identified)
+            system_message = None
+            messages_for_storage = list(messages)  # Make a copy
+
+            if messages_for_storage and messages_for_storage[0].get("role") == "system":
+                system_message = messages_for_storage[0].get("content")
+                # Remove system from messages_for_storage since it's saved separately
+                messages_for_storage = messages_for_storage[1:]
+                logger.debug(f"Extracted system prompt: {len(system_message) if system_message else 0} chars")
+
+            # Extract tool results from conversation (separately identified)
+            tool_results = None
+            tool_messages = [m for m in messages if m.get("role") == "tool"]
+            if tool_messages:
+                tool_results = [
+                    {
+                        "tool_call_id": m.get("tool_call_id"),
+                        "content": m.get("content"),
+                    }
+                    for m in tool_messages
+                ]
+                logger.debug(f"Found {len(tool_results)} tool results")
+
+            # Basic info
+            model = kwargs.get("model", data.get("model", "unknown"))
+            span_id = uuid4().hex[:16]
+            trace_id = uuid4().hex[:32]
+
+            # Build enhanced attributes - only add non-None values
+            attributes: Attributes = {
+                "llm.model": model,
+                # Full messages array (without system, already saved separately)
+                "llm.request.messages": json.dumps(messages_for_storage, ensure_ascii=False),
+            }
+
+            # System prompt (separately identified) - only add if present
+            if system_message is not None:
+                attributes["llm.request.system"] = system_message
+
+            # Request parameters - only add if present
+            temperature = data.get("temperature")
+            if temperature is not None:
+                attributes["llm.request.temperature"] = temperature
+
+            max_tokens = data.get("max_tokens")
+            if max_tokens is not None:
+                attributes["llm.request.max_tokens"] = max_tokens
+
+            top_p = data.get("top_p")
+            if top_p is not None:
+                attributes["llm.request.top_p"] = top_p
+
+            # Save tools definition if present
+            if data.get("tools"):
+                attributes["llm.request.tools"] = json.dumps(data["tools"], ensure_ascii=False)
+
+            # Process response - handle both object and dict formats
+            content = None
+            if response_obj:
+                diagnostic_logger.info(f"[RESPONSE_DEBUG] Response object type: {type(response_obj)}")
+                diagnostic_logger.info(f"[RESPONSE_DEBUG] Response object dir: {[x for x in dir(response_obj) if not x.startswith('_')]}")
+
+                # Try to get the dict representation for objects
+                if hasattr(response_obj, '__dict__'):
+                    diagnostic_logger.info(f"[RESPONSE_DEBUG] Response __dict__: {response_obj.__dict__}")
+                elif hasattr(response_obj, 'model_dump'):
+                    diagnostic_logger.info(f"[RESPONSE_DEBUG] Response model_dump: {response_obj.model_dump()}")
+                elif isinstance(response_obj, dict):
+                    diagnostic_logger.info(f"[RESPONSE_DEBUG] Response dict keys: {list(response_obj.keys())}")
+                    diagnostic_logger.info(f"[RESPONSE_DEBUG] Response dict: {response_obj}")
+
+                # Handle dict-style response (some providers return this)
+                if isinstance(response_obj, dict):
+                    logger.debug(f"Response is dict, keys: {list(response_obj.keys())}")
+
+                    # Try OpenAI-style format first (with choices)
+                    choices = response_obj.get("choices", [])
+                    if choices:
+                        choice = choices[0]
+                        message = choice.get("message", {})
+                        content = message.get("content")
+                        if content:
+                            attributes["llm.response.content"] = content
+                            logger.debug(f"Got content from dict (OpenAI-style): {len(content)} chars")
+
+                        # Check for tool_calls
+                        tool_calls = message.get("tool_calls")
+                        if tool_calls:
+                            attributes["llm.response.tool_calls"] = json.dumps(tool_calls, ensure_ascii=False)
+                            logger.debug(f"Found tool_calls in dict response")
+
+                    # Try Anthropic-style format (direct content field)
+                    elif "content" in response_obj:
+                        content_array = response_obj.get("content", [])
+                        if content_array:
+                            # Anthropic returns content as an array of blocks
+                            # Extract text from text blocks
+                            text_parts = []
+                            tool_use_parts = []
+
+                            for block in content_array:
+                                if isinstance(block, dict):
+                                    block_type = block.get("type")
+                                    if block_type == "text":
+                                        text_parts.append(block.get("text", ""))
+                                    elif block_type == "tool_use":
+                                        tool_use_parts.append({
+                                            "id": block.get("id"),
+                                            "name": block.get("name"),
+                                            "input": block.get("input"),
+                                        })
+
+                            if text_parts:
+                                attributes["llm.response.content"] = "".join(text_parts)
+                                logger.debug(f"Got content from dict (Anthropic-style): {len(attributes['llm.response.content'])} chars")
+
+                            if tool_use_parts:
+                                attributes["llm.response.tool_calls"] = json.dumps(tool_use_parts, ensure_ascii=False)
+                                logger.debug(f"Found tool_use blocks in Anthropic response")
+
+                    # Usage from dict
+                    usage = response_obj.get("usage")
+                    if usage:
+                        attributes["llm.usage.prompt_tokens"] = usage.get("prompt_tokens", 0)
+                        attributes["llm.usage.completion_tokens"] = usage.get("completion_tokens", 0)
+                        attributes["llm.usage.total_tokens"] = usage.get("total_tokens", 0)
+                        logger.debug(f"Got usage from dict: {usage}")
+
+                # Handle object-style response
+                else:
+                    # Check for Claude Responses API format first (has 'output' field, no 'choices')
+                    if hasattr(response_obj, 'output') and getattr(response_obj, 'output'):
+                        output = getattr(response_obj, 'output')
+                        diagnostic_logger.info(f"[RESPONSE_DEBUG] Detected Responses API format, output type: {type(output)}")
+
+                        # Responses API output is a list of items (reasoning, messages, etc.)
+                        if isinstance(output, list):
+                            text_parts = []
+                            reasoning_parts = []
+                            tool_use_parts = []
+
+                            for item in output:
+                                # Get item type
+                                item_type = getattr(item, 'type', None) or (item.__class__.__name__ if hasattr(item, '__class__') else '')
+
+                                diagnostic_logger.info(f"[RESPONSE_DEBUG] Output item type: {item_type}")
+
+                                # Handle reasoning items
+                                if item_type and 'reasoning' in item_type.lower():
+                                    # Extract reasoning content
+                                    content = getattr(item, 'content', [])
+                                    if content:
+                                        for c in content:
+                                            if hasattr(c, 'text'):
+                                                reasoning_parts.append(c.text)
+
+                                # Handle message items
+                                elif item_type and 'message' in item_type.lower():
+                                    # Extract message content
+                                    content_list = getattr(item, 'content', [])
+                                    if content_list:
+                                        for c in content_list:
+                                            c_type = getattr(c, 'type', None)
+                                            if c_type == 'output_text':
+                                                text = getattr(c, 'text', None)
+                                                if text:
+                                                    text_parts.append(text)
+                                            elif c_type == 'tool_use':
+                                                # Tool use in response
+                                                tool_use_parts.append({
+                                                    'id': getattr(c, 'id', None),
+                                                    'name': getattr(c, 'name', None),
+                                                    'input': getattr(c, 'input', None),
+                                                })
+
+                            # Save reasoning if present
+                            if reasoning_parts:
+                                attributes['llm.response.reasoning'] = ''.join(reasoning_parts)
+
+                            # Save text content
+                            if text_parts:
+                                attributes["llm.response.content"] = ''.join(text_parts)
+                                diagnostic_logger.info(f"[RESPONSE_DEBUG] SUCCESS: Got content from Responses API ({len(attributes['llm.response.content'])} chars)")
+                            else:
+                                diagnostic_logger.warning(f"[RESPONSE_DEBUG] FAILED: No text content found in Responses API output")
+
+                            # Save tool calls if present
+                            if tool_use_parts:
+                                attributes["llm.response.tool_calls"] = json.dumps(tool_use_parts, ensure_ascii=False)
+
+                        # Handle usage from Responses API
+                        usage = getattr(response_obj, 'usage', None)
+                        if usage:
+                            attributes["llm.usage.prompt_tokens"] = getattr(usage, 'prompt_tokens', 0)
+                            attributes["llm.usage.completion_tokens"] = getattr(usage, 'completion_tokens', 0)
+                            attributes["llm.usage.total_tokens"] = getattr(usage, 'total_tokens', 0)
+
+                    # Then check for OpenAI format (has 'choices')
+                    elif hasattr(response_obj, 'choices'):
+                        choices = getattr(response_obj, "choices", [])
+                        diagnostic_logger.info(f"[RESPONSE_DEBUG] OpenAI format, Choices count: {len(choices)}, type: {type(choices)}")
+
+                        if choices:
+                            choice = choices[0]
+                            diagnostic_logger.info(f"[RESPONSE_DEBUG] Choice type: {type(choice)}")
+
+                            message = getattr(choice, "message", {})
+                            diagnostic_logger.info(f"[RESPONSE_DEBUG] Message type: {type(message)}")
+
+                            content = getattr(message, "content", None)
+                            diagnostic_logger.info(f"[RESPONSE_DEBUG] Content from message.content: {repr(content)[:200] if content else 'None'}")
+
+                            if content:
+                                attributes["llm.response.content"] = content
+                                diagnostic_logger.info(f"[RESPONSE_DEBUG] SUCCESS: Got content ({len(content)} chars)")
+                            else:
+                                diagnostic_logger.warning(f"[RESPONSE_DEBUG] FAILED: Could not extract content from message.content")
+
+                            # Extract reasoning_content (thinking process) if present
+                            reasoning = getattr(message, "reasoning_content", None)
+                            if reasoning:
+                                attributes["llm.response.reasoning"] = reasoning
+                                diagnostic_logger.info(f"[RESPONSE_DEBUG] Got reasoning_content ({len(reasoning)} chars)")
+                            else:
+                                # Also check provider_specific_fields for reasoning
+                                provider_fields = getattr(choice, "provider_specific_fields", {})
+                                if provider_fields and isinstance(provider_fields, dict):
+                                    reasoning = provider_fields.get("reasoning")
+                                    if reasoning:
+                                        attributes["llm.response.reasoning"] = reasoning
+                                        diagnostic_logger.info(f"[RESPONSE_DEBUG] Got reasoning from provider_fields ({len(reasoning)} chars)")
+
+                            # Extract tool_calls (separately identified)
+                            if hasattr(message, "tool_calls") and message.tool_calls:
+                                tool_calls = [
+                                    {
+                                        "id": tc.id,
+                                        "type": tc.type,
+                                        "function": {
+                                            "name": tc.function.name,
+                                            "arguments": tc.function.arguments,
+                                        }
+                                    }
+                                    for tc in message.tool_calls
+                                ]
+                                attributes["llm.response.tool_calls"] = json.dumps(
+                                    tool_calls, ensure_ascii=False
+                                )
+
+                            # Provider-specific fields (like token_ids from vLLM)
+                            provider_fields = getattr(choice, "provider_specific_fields", {})
+                            if provider_fields:
+                                attributes["llm.provider.token_ids"] = str(
+                                    provider_fields.get("token_ids", [])
+                                )
+
+                        # Add usage information
+                        usage = getattr(response_obj, "usage", None)
+                        if usage:
+                            attributes["llm.usage.prompt_tokens"] = getattr(usage, "prompt_tokens", 0)
+                            attributes["llm.usage.completion_tokens"] = getattr(
+                                usage, "completion_tokens", 0
+                            )
+                            attributes["llm.usage.total_tokens"] = getattr(usage, "total_tokens", 0)
+
+                    # Check for prompt_token_ids (from vLLM)
+                    if hasattr(response_obj, "prompt_token_ids"):
+                        attributes["llm.prompt_token_ids"] = str(response_obj.prompt_token_ids)
+
+            # Save tool results if present
+            if tool_results:
+                attributes["llm.conversation.tool_results"] = json.dumps(
+                    tool_results, ensure_ascii=False
+                )
+
+            # Convert datetime to timestamp if needed
+            start_ts = _to_timestamp(start_time)
+            end_ts = _to_timestamp(end_time)
+
+            # Create the span
+            span = Span(
+                name="llm.completion",
+                context=SpanContext(trace_id=trace_id, span_id=span_id),
+                start_time=start_ts,
+                end_time=end_ts,
+                kind=SpanKind.CLIENT,
+                status="OK",
+                attributes=attributes,
+                resource=Resource(
+                    attributes={
+                        "service.name": "openclaw-tracer",
+                        "llm.provider": kwargs.get("provider", "litellm"),
+                    }
+                ),
+            )
+
+            # Store the span
+            await self.store.add_span(span)
+
+        except Exception as e:
+            logger.error(f"Error in async_log_success_event: {e}", exc_info=True)
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        """Called when an LLM request fails.
+
+        Still captures complete conversation data for debugging.
+        """
+        try:
+            # Extract data from kwargs - same logic as success event
+            data = {}
+            messages = []
+
+            if isinstance(kwargs, dict):
+                if "messages" in kwargs:
+                    messages = kwargs["messages"]
+                    data = kwargs
+                elif "litellm_params" in kwargs:
+                    litellm_params = kwargs["litellm_params"]
+                    messages = litellm_params.get("messages", [])
+                    data = litellm_params
+                elif "data" in kwargs and isinstance(kwargs["data"], dict):
+                    messages = kwargs["data"].get("messages", [])
+                    data = kwargs["data"]
+                else:
+                    data = _get_pre_call_data(kwargs, kwargs)
+                    messages = data.get("messages", [])
+
+            # Extract system prompt (separately identified)
+            system_message = None
+            messages_for_storage = list(messages)
+
+            if messages_for_storage and messages_for_storage[0].get("role") == "system":
+                system_message = messages_for_storage[0].get("content")
+                messages_for_storage = messages_for_storage[1:]
+
+            model = kwargs.get("model", data.get("model", "unknown"))
+            span_id = uuid4().hex[:16]
+            trace_id = uuid4().hex[:32]
+
+            attributes: Attributes = {
+                "llm.model": model,
+                # Full messages array
+                "llm.request.messages": json.dumps(messages_for_storage, ensure_ascii=False),
+                # Error information
+                "llm.error": str(response_obj) if response_obj else "Unknown error",
+            }
+
+            # System prompt (separately identified) - only add if present
+            if system_message is not None:
+                attributes["llm.request.system"] = system_message
+
+            # Convert datetime to timestamp if needed
+            start_ts = _to_timestamp(start_time)
+            end_ts = _to_timestamp(end_time)
+
+            span = Span(
+                name="llm.completion",
+                context=SpanContext(trace_id=trace_id, span_id=span_id),
+                start_time=start_ts,
+                end_time=end_ts,
+                kind=SpanKind.CLIENT,
+                status="ERROR",
+                attributes=attributes,
+                resource=Resource(
+                    attributes={
+                        "service.name": "openclaw-tracer",
+                        "llm.provider": kwargs.get("provider", "litellm"),
+                    }
+                ),
+            )
+
+            await self.store.add_span(span)
+
+        except Exception as e:
+            logger.error(f"Error in async_log_failure_event: {e}", exc_info=True)
+
+
+class LLMProxy:
+    """LiteLLM proxy server for data collection.
+
+    This class wraps LiteLLM's proxy server with custom logging to capture
+    all LLM requests and responses for training data collection.
+
+    Usage:
+        ```python
+        store = ParquetStore(output_dir="data")
+        proxy = LLMProxy(
+            port=43886,
+            model_list=[...],
+            store=store,
+            log_file="logs/http.jsonl"
+        )
+        await proxy.start()
+        ```
+    """
+
+    def __init__(
+        self,
+        port: Optional[int] = None,
+        model_list: Optional[List[Dict[str, Any]]] = None,
+        store: Optional[StorageBackend] = None,
+        host: str = "0.0.0.0",
+        num_workers: int = 1,
+        log_file: Optional[str] = None,
+    ):
+        """Initialize the LLM proxy.
+
+        Args:
+            port: Port to listen on. If None, a random port is picked.
+            model_list: List of model configurations for LiteLLM.
+            store: Storage backend for collected data.
+            host: Host to bind to.
+            num_workers: Number of worker processes.
+            log_file: Path to HTTP access log file (JSONL format).
+        """
+        self.port = port or 43886
+        self.host = host
+        self.num_workers = num_workers
+
+        # Model list
+        self.model_list = model_list or []
+
+        # Storage backend
+        self.store = store or ParquetStore()
+
+        # Span logger
+        self.span_logger = SpanLogger(self.store)
+
+        # Request sanitizer (removes unsupported params like tool_choice)
+        self.request_sanitizer = RequestSanitizer()
+
+        # HTTP access logger
+        self.http_logger = HTTPAccessLogger(log_file)
+
+        # Server state
+        self._app: Optional[Any] = None
+        self._server: Optional[Any] = None
+        self._is_running = False
+
+        # Register the logger with LiteLLM
+        self._litellm_callback = self.span_logger
+        self._litellm_callback.callback_name = "span_logger"
+
+    async def start(self) -> None:
+        """Start the proxy server."""
+        if self._is_running:
+            logger.warning("Proxy server is already running")
+            return
+
+        logger.info(f"Starting LLM proxy on {self.host}:{self.port}")
+
+        if self.http_logger.log_file:
+            logger.info(f"HTTP access log: {self.http_logger.log_file}")
+
+        # Load configuration into LiteLLM proxy
+        from litellm.proxy.proxy_server import proxy_config
+        import tempfile
+
+        # Create YAML config from model_list
+        yaml_content = "model_list:\n"
+        for model in self.model_list:
+            yaml_content += f"  - model_name: {model['model_name']}\n"
+            yaml_content += f"    litellm_params:\n"
+            for key, value in model['litellm_params'].items():
+                if isinstance(value, str):
+                    yaml_content += f"      {key}: \"{value}\"\n"
+                else:
+                    yaml_content += f"      {key}: {value}\n"
+
+        # Write to temp file and load
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write(yaml_content)
+            config_file = f.name
+
+        try:
+            # Load config into proxy
+            from litellm.proxy import proxy_server
+            new_router, models, _ = await proxy_config.load_config(None, config_file)
+
+            # Set the new router to proxy_server
+            proxy_server.llm_router = new_router
+
+            logger.info(f"Loaded {len(self.model_list)} model(s) from config")
+        finally:
+            # Clean up temp file
+            import os
+            os.unlink(config_file)
+
+        # Add the custom logger
+        from litellm import logging_callback_manager
+        logging_callback_manager.add_litellm_callback(self._litellm_callback)
+
+        # Note: RequestSanitizer is disabled to allow tool calls through the proxy
+        # If using models that don't support tools (like GLM-4.7), you may get 400 errors
+
+        # Add HTTP logging middleware
+        self._setup_http_middleware(app)
+
+        self._app = app
+
+        # Start the server
+        import uvicorn
+
+        server_config = uvicorn.Config(
+            app,
+            host=self.host,
+            port=self.port,
+            workers=self.num_workers,
+            log_level="info",
+        )
+        self._server = uvicorn.Server(server_config)
+
+        # Run server in background task
+        self._server_task = asyncio.create_task(self._server.serve())
+        self._is_running = True
+
+        logger.info(f"LLM proxy started on http://{self.host}:{self.port}")
+        logger.info(f"Models available: {[m.get('model_name', m.get('model')) for m in self.model_list]}")
+
+    def _setup_http_middleware(self, fastapi_app: Any) -> None:
+        """Set up HTTP logging middleware for the FastAPI app.
+
+        Args:
+            fastapi_app: The FastAPI application instance
+        """
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.requests import Request as StarletteRequest
+        from starlette.responses import Response as StarletteResponse
+
+        class HTTPLogMiddleware(BaseHTTPMiddleware):
+            def __init__(self, app, http_logger: HTTPAccessLogger):
+                super().__init__(app)
+                self.http_logger = http_logger
+
+            async def dispatch(
+                self,
+                request: StarletteRequest,
+                call_next,
+            ) -> StarletteResponse:
+                # Extract request info
+                method = request.method
+                path = str(request.url.path)
+                query = str(request.url.query) if request.url.query else None
+
+                # Get headers
+                headers = dict(request.headers)
+
+                # Get body (for POST/PUT/PATCH)
+                body = None
+                if method in ("POST", "PUT", "PATCH"):
+                    try:
+                        body_bytes = await request.body()
+                        if body_bytes:
+                            body = body_bytes.decode("utf-8", errors="replace")
+                    except Exception:
+                        pass
+
+                # Log request
+                request_id = await self.http_logger.log_request(
+                    method=method,
+                    path=f"{path}?{query}" if query else path,
+                    headers=headers,
+                    body=body,
+                )
+
+                # Process request
+                try:
+                    response = await call_next(request)
+
+                    # Get response body (if possible)
+                    response_body = None
+                    try:
+                        response_body_bytes = response.body
+                        if response_body_bytes:
+                            response_body = response_body_bytes.decode("utf-8", errors="replace")
+                    except Exception:
+                        pass
+
+                    # Log response
+                    await self.http_logger.log_response(
+                        request_id=request_id,
+                        status_code=response.status_code,
+                        headers=dict(response.headers) if hasattr(response, "headers") else {},
+                        body=response_body,
+                    )
+
+                    return response
+
+                except Exception as e:
+                    # Log error
+                    await self.http_logger.log_response(
+                        request_id=request_id,
+                        status_code=500,
+                        headers={},
+                        body=None,
+                        error=str(e),
+                    )
+                    raise
+
+        # Add middleware to the app
+        fastapi_app.add_middleware(HTTPLogMiddleware, http_logger=self.http_logger)
+
+    async def stop(self) -> None:
+        """Stop the proxy server."""
+        if not self._is_running:
+            return
+
+        logger.info("Stopping LLM proxy")
+
+        if self._server:
+            self._server.should_exit = True
+
+        if self._server_task:
+            await self._server_task
+
+        # Flush storage
+        await self.store.flush()
+
+        self._is_running = False
+        logger.info("LLM proxy stopped")
+
+    async def wait(self) -> None:
+        """Wait until the server is stopped."""
+        if self._server_task:
+            await self._server_task
+
+    @property
+    def is_running(self) -> bool:
+        """Check if the proxy is running."""
+        return self._is_running
+
+    @property
+    def url(self) -> str:
+        """Get the base URL of the proxy."""
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def v1_url(self) -> str:
+        """Get the v1 API endpoint URL."""
+        return f"{self.url}/v1"
+
+    @property
+    def stats(self) -> Dict[str, Any]:
+        """Get proxy statistics."""
+        return {
+            "host": self.host,
+            "port": self.port,
+            "is_running": self._is_running,
+            "url": self.url,
+            "model_count": len(self.model_list),
+            "storage": self.store.stats,
+            "log_file": str(self.http_logger.log_file) if self.http_logger.log_file else None,
+        }
+
+
+# Convenience function for quick startup
+
+
+async def run_proxy(
+    model_list: List[Dict[str, Any]],
+    port: Optional[int] = None,
+    output_dir: str = "data",
+    log_file: Optional[str] = None,
+) -> LLMProxy:
+    """Run the LLM proxy server.
+
+    Args:
+        model_list: List of model configurations.
+        port: Port to listen on.
+        output_dir: Directory for Parquet output.
+        log_file: Path to HTTP access log file (JSONL format).
+
+    Returns:
+        The running LLMProxy instance.
+
+    Example:
+        ```python
+        proxy = await run_proxy(
+            model_list=[{
+                "model_name": "gpt-4",
+                "litellm_params": {"model": "openai/gpt-4"},
+            }],
+            port=43886,
+            log_file="logs/http.jsonl"
+        )
+        ```
+    """
+    store = ParquetStore(output_dir=output_dir)
+    proxy = LLMProxy(port=port, model_list=model_list, store=store, log_file=log_file)
+    await proxy.start()
+    return proxy

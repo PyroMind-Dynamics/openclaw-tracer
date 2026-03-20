@@ -1,0 +1,86 @@
+{
+    "_comment": "完整配置示例 - 包含各种提供商的配置选项",
+    "_usage": "复制此文件并根据需要修改，然后重命名为 models.json",
+
+    "model_list": [
+        {
+            "_comment": "OpenAI 模型配置",
+            "model_name": "gpt-4",
+            "litellm_params": {
+                "model": "openai/gpt-4",
+                "api_key": "env:OPENAI_API_KEY"
+            }
+        },
+        {
+            "_comment": "OpenAI GPT-4o-mini (更便宜)",
+            "model_name": "gpt-4o-mini",
+            "litellm_params": {
+                "model": "openai/gpt-4o-mini",
+                "api_key": "env:OPENAI_API_KEY"
+            }
+        },
+        {
+            "_comment": "Anthropic Claude",
+            "model_name": "claude-3-5-sonnet",
+            "litellm_params": {
+                "model": "anthropic/claude-3-5-sonnet-20241022",
+                "api_key": "env:ANTHROPIC_API_KEY"
+            }
+        },
+        {
+            "_comment": "Azure OpenAI 配置",
+            "model_name": "azure-gpt-4",
+            "litellm_params": {
+                "model": "azure/gpt-4",
+                "api_key": "env:AZURE_API_KEY",
+                "api_base": "https://your-resource.openai.azure.com",
+                "api_version": "2023-05-15"
+            }
+        },
+        {
+            "_comment": "本地 vLLM 模型配置",
+            "_note": "需要先启动 vLLM 服务，例如: vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000",
+            "model_name": "local-qwen",
+            "litellm_params": {
+                "model": "hosted_vllm/Qwen/Qwen2.5-7B-Instruct",
+                "api_base": "http://localhost:8000/v1"
+            }
+        },
+        {
+            "_comment": "本地 Llama 3 via vLLM",
+            "model_name": "local-llama-3",
+            "litellm_params": {
+                "model": "hosted_vllm/meta-llama/Meta-Llama-3-8B-Instruct",
+                "api_base": "http://localhost:8001/v1"
+            }
+        },
+        {
+            "_comment": "DeepSeek (通过 OpenAI 兼容 API)",
+            "model_name": "deepseek-chat",
+            "litellm_params": {
+                "model": "openai/deepseek-chat",
+                "api_base": "https://api.deepseek.com/v1",
+                "api_key": "env:DEEPSEEK_API_KEY"
+            }
+        }
+    ],
+
+    "general_settings": {
+        "master_key": "sk-test-key",
+        "_comment_master_key": "用于代理服务器验证的密钥，生产环境请修改"
+    },
+
+    "litellm_settings": {
+        "drop_params": true,
+        "set_verbose": false,
+        "_comment": "drop_params: 忽略不支持的参数",
+        "_comment_set_verbose": "是否输出详细日志"
+    },
+
+    "_environment_variables_example": {
+        "OPENAI_API_KEY": "sk-...",
+        "ANTHROPIC_API_KEY": "sk-ant-...",
+        "AZURE_API_KEY": "your-azure-key",
+        "DEEPSEEK_API_KEY": "sk-..."
+    }
+}
