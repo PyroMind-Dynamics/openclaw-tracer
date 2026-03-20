@@ -15,6 +15,13 @@ services:
       - PORT=${PORT:-43886}
       - BUFFER_SIZE=${BUFFER_SIZE:-1}
       - TIME_WINDOW_MINUTES=${TIME_WINDOW_MINUTES:-30}
+      - TRAJECTORY_BUFFER_SIZE=${TRAJECTORY_BUFFER_SIZE:-0}
+      # 模型配置（通过环境变量注入）
+      - TARGET_MODEL=${TARGET_MODEL:-}
+      - ORIGIN_MODEL=${ORIGIN_MODEL:-}
+      - API_MODE=${API_MODE:-}
+      - API_URL=${API_URL:-}
+      - ACCESS_KEY=${ACCESS_KEY:-EMPTY}
 
     # 挂载卷
     volumes:
@@ -28,7 +35,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 5s
+      start_period: 10s
 
     # 日志配置
     logging:
