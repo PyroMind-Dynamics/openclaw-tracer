@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 from uuid import uuid4
 
 from litellm.integrations.custom_logger import CustomLogger
@@ -271,33 +271,91 @@ def _get_pre_call_data(args: Any, kwargs: Any) -> Dict[str, Any]:
 class RequestSanitizer(CustomLogger):
     """LiteLLM callback to sanitize requests before sending to upstream API.
 
-    Removes parameters that are not supported by certain backends (e.g., vLLM).
+    Removes parameters that are not supported by certain backends (e.g., vLLM, Gemini OpenAI compatibility).
+
+    Can be configured to only sanitize specific models by name prefix.
     """
 
     # Parameters to remove from requests
     SANITIZED_PARAMS = {"tool_choice", "tools", "tool_use", "parallel_tool_calls"}
 
+    def __init__(self, sanitize_models: Optional[Set[str]] = None):
+        """Initialize the request sanitizer.
+
+        Args:
+            sanitize_models: Set of model name prefixes that should have their requests sanitized.
+                           If None, all models are sanitized.
+                           Example: {"gemini", "gpt"} will sanitize "gemini-pro" and "gpt-4" but not "claude-3".
+        """
+        super().__init__()
+        self.sanitize_models = sanitize_models
+
+    def _should_sanitize(self, model: str) -> bool:
+        """Check if a model should have its requests sanitized.
+
+        Args:
+            model: The model name/identifier.
+
+        Returns:
+            True if the model should be sanitized, False otherwise.
+        """
+        if self.sanitize_models is None:
+            # Sanitize all models
+            return True
+        # Check if model name starts with any of the prefixes
+        return any(model.startswith(prefix) for prefix in self.sanitize_models)
+
     async def async_log_pre_api_call(self, kwargs, **_):
         """Called before the API request is made.
 
-        Removes unsupported parameters from the request.
+        Removes unsupported parameters from the request for configured models.
 
         Args:
             kwargs: The request kwargs that will be sent to the API
         """
+        # Debug: log the structure of kwargs
+        logger.debug(f"[RequestSanitizer] Called with kwargs keys: {kwargs.keys() if isinstance(kwargs, dict) else 'not a dict'}")
+        logger.debug(f"[RequestSanitizer] sanitize_models: {self.sanitize_models}")
+
+        # Check if we should sanitize this model
+        # Try multiple ways to get the model name
+        model = kwargs.get("model", "")
+        logger.debug(f"[RequestSanitizer] Initial model from kwargs['model']: '{model}'")
+
+        # If model is empty, try other locations
+        if not model and isinstance(kwargs, dict):
+            litellm_params = kwargs.get("litellm_params", {})
+            model = litellm_params.get("model", "")
+            logger.debug(f"[RequestSanitizer] Model from litellm_params: '{model}'")
+
+        should_sanitize = self._should_sanitize(model)
+        logger.debug(f"[RequestSanitizer] Should sanitize '{model}': {should_sanitize}")
+
+        if not should_sanitize:
+            return kwargs
+
         # Sanitize the data payload
         if isinstance(kwargs, dict):
             # Check for data in kwargs
             data = kwargs.get("data")
+            logger.debug(f"[RequestSanitizer] data in kwargs: {data is not None}, type: {type(data)}")
+
             if isinstance(data, dict):
+                logger.debug(f"[RequestSanitizer] data keys: {data.keys()}")
+                logger.debug(f"[RequestSanitizer] data.get('tools'): {data.get('tools')}")
+
                 modified = False
                 original_data = data.copy()
                 for param in self.SANITIZED_PARAMS:
                     if param in data:
                         del data[param]
                         modified = True
+                        logger.info(f"[RequestSanitizer] Removed '{param}' from request")
+
                 if modified:
-                    logger.info(f"Sanitized request: removed {self.SANITIZED_PARAMS & set(original_data.keys())} from request")
+                    logger.info(
+                        f"Sanitized request for '{model}': removed {self.SANITIZED_PARAMS & set(original_data.keys())} from request"
+                    )
 
         return kwargs
 
@@ -799,7 +857,10 @@ class LLMProxy:
         self.span_logger = SpanLogger(self.store)
 
         # Request sanitizer (removes unsupported params like tool_choice)
-        self.request_sanitizer = RequestSanitizer()
+        # Configure which models need tool parameters removed
+        # Gemini via OpenAI compatibility mode requires this due to thought_signature requirement
+        sanitize_models = self._get_sanitize_models()
+        self.request_sanitizer = RequestSanitizer(sanitize_models=sanitize_models)
 
         # HTTP access logger
         self.http_logger = HTTPAccessLogger(log_file)
@@ -812,6 +873,45 @@ class LLMProxy:
         # Register the logger with LiteLLM
         self._litellm_callback = self.span_logger
         self._litellm_callback.callback_name = "span_logger"
+
+    def _get_sanitize_models(self) -> Optional[Set[str]]:
+        """Identify which models need their tool parameters sanitized.
+
+        Models using OpenAI compatibility mode with different tool calling semantics
+        (like Gemini) need tool parameters removed.
+
+        Returns:
+            Set of model name prefixes that should be sanitized, or None for all models.
+        """
+        sanitize_models = set()
+
+        logger.info(f"[RequestSanitizer] Checking {len(self.model_list)} models for sanitization...")
+
+        for model in self.model_list:
+            model_name = model.get("model_name", "")
+            litellm_params = model.get("litellm_params", {})
+            litellm_model = litellm_params.get("model", "")
+
+            logger.info(f"[RequestSanitizer] Checking model: {model_name}, litellm_model: {litellm_model}")
+
+            # Detect models using OpenAI compatibility mode with Gemini
+            # These models have the thought_signature requirement issue
+            if "openai/" in litellm_model and ("gemini" in litellm_model.lower() or "gemini" in model_name.lower()):
+                # Extract the model name prefix (e.g., "gemini-3-flash-preview")
+                sanitize_models.add(model_name)
+                logger.info(f"[RequestSanitizer] ✓ Marked '{model_name}' for tool parameter sanitization (Gemini via OpenAI compat)")
+
+            # Check for explicit drop_params flag
+            if litellm_params.get("drop_params"):
+                # Models with drop_params might also need sanitization
+                # Add model_name to be safe
+                if "gemini" in model_name.lower() or "gemini" in litellm_model.lower():
+                    if model_name not in sanitize_models:
+                        sanitize_models.add(model_name)
+                        logger.info(f"[RequestSanitizer] ✓ Marked '{model_name}' for tool parameter sanitization (drop_params + Gemini)")
+
+        logger.info(f"[RequestSanitizer] Final sanitize_models set: {sanitize_models}")
+        return sanitize_models if sanitize_models else None
 
     async def start(self) -> None:
         """Start the proxy server."""
@@ -858,15 +958,23 @@ class LLMProxy:
             import os
             os.unlink(config_file)
 
-        # Add the custom logger
+        # Add the custom loggers
         from litellm import logging_callback_manager
+
+        # Add span logger for data collection
         logging_callback_manager.add_litellm_callback(self._litellm_callback)
 
-        # Note: RequestSanitizer is disabled to allow tool calls through the proxy
-        # If using models that don't support tools (like GLM-4.7), you may get 400 errors
+        # Add request sanitizer to remove unsupported parameters (e.g., tools for Gemini)
+        self.request_sanitizer.callback_name = "request_sanitizer"
+        logging_callback_manager.add_litellm_callback(self.request_sanitizer)
+
+        logger.info(f"Request sanitizer enabled for models: {self.request_sanitizer.sanitize_models}")
 
         # Add HTTP logging middleware
         self._setup_http_middleware(app)
+
+        # Register /status endpoint for collection progress
+        self._register_status_route(app)
 
         self._app = app
 
@@ -885,6 +993,10 @@ class LLMProxy:
         # Run server in background task
         self._server_task = asyncio.create_task(self._server.serve())
         self._is_running = True
+
+        # Start periodic flush for the storage backend
+        if hasattr(self.store, "start_periodic_flush"):
+            self.store.start_periodic_flush()
 
         logger.info(f"LLM proxy started on http://{self.host}:{self.port}")
         logger.info(f"Models available: {[m.get('model_name', m.get('model')) for m in self.model_list]}")
@@ -971,6 +1083,20 @@ class LLMProxy:
 
         # Add middleware to the app
         fastapi_app.add_middleware(HTTPLogMiddleware, http_logger=self.http_logger)
+
+    def _register_status_route(self, fastapi_app: Any) -> None:
+        """Register the /status endpoint for collection progress.
+
+        Args:
+            fastapi_app: The FastAPI application instance
+        """
+        store = self.store
+
+        @fastapi_app.get("/status")
+        async def collection_status():
+            if hasattr(store, "get_collection_status"):
+                return store.get_collection_status()
+            return {"error": "Status not available for this storage backend"}
 
     async def stop(self) -> None:
         """Stop the proxy server."""

@@ -7,4 +7,3 @@ __pycache__/*
 docs/*
 config/models.json
 .DS_Store
-config/models.json

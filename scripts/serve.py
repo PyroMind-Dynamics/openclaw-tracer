@@ -59,6 +59,8 @@ async def main(
     buffer_size: int = 1,
     time_window_minutes: int = 5,
     log_file: str | None = None,
+    trajectory_buffer_size: int = 0,
+    flush_interval_seconds: int = 1800,
 ):
     """启动代理服务器
 
@@ -70,6 +72,8 @@ async def main(
         buffer_size: 缓冲区大小 (默认: 1，每次请求立即写入)
         time_window_minutes: 时间窗口分钟数 (默认: 5)
         log_file: HTTP访问日志文件路径 (JSONL格式)
+        trajectory_buffer_size: 总保留数据条数 (0=不启用分批)
+        flush_interval_seconds: 定时 flush 间隔秒数 (默认: 1800 = 30分钟, 0=禁用)
     """
     # 加载模型配置
     model_list = []
@@ -96,18 +100,59 @@ async def main(
             })
             print("✓ 检测到 ANTHROPIC_API_KEY，添加 claude-3-5-sonnet")
 
+    # 读取环境变量配置的模型（合并模式）
+    target_model = os.getenv("TARGET_MODEL")
+    api_url = os.getenv("API_URL")
+    access_key = os.getenv("ACCESS_KEY", "EMPTY")
+    origin_model = os.getenv("ORIGIN_MODEL")
+    api_mode = os.getenv("API_MODE")
+
+    if target_model and origin_model:
+        litellm_model = f"{api_mode}/{origin_model}" if api_mode else origin_model
+        env_model_entry = {
+            "model_name": target_model,
+            "litellm_params": {
+                "model": litellm_model,
+                "api_key": access_key,
+            },
+        }
+        if api_url:
+            env_model_entry["litellm_params"]["api_base"] = api_url
+        model_list.append(env_model_entry)
+        print(f"✓ 环境变量配置模型: {target_model} -> {litellm_model}")
+
+    # 环境变量覆盖 buffer 参数
+    env_buffer = os.getenv("BUFFER_SIZE")
+    env_trajectory = os.getenv("TRAJECTORY_BUFFER_SIZE")
+    env_flush_interval = os.getenv("FLUSH_INTERVAL_SECONDS")
+    if env_buffer:
+        buffer_size = int(env_buffer)
+    if env_trajectory:
+        trajectory_buffer_size = int(env_trajectory)
+    if env_flush_interval:
+        flush_interval_seconds = int(env_flush_interval)
+
+    # 校验
+    if trajectory_buffer_size > 0:
+        assert buffer_size > 0, "BUFFER_SIZE must be > 0 when TRAJECTORY_BUFFER_SIZE is set"
+        assert trajectory_buffer_size >= buffer_size, (
+            f"TRAJECTORY_BUFFER_SIZE ({trajectory_buffer_size}) must be >= BUFFER_SIZE ({buffer_size})"
+        )
+
     if not model_list:
-        print("✗ 没有配置任何模型")
-        print("  请:")
+        print("⚠ 没有配置任何模型，服务将以空配置启动")
+        print("  可通过以下方式配置模型:")
         print("  1. 提供 --config 参数指定配置文件")
-        print("  2. 或设置环境变量 (OPENAI_API_KEY, ANTHROPIC_API_KEY 等)")
-        return
+        print("  2. 设置环境变量 (TARGET_MODEL + ORIGIN_MODEL)")
+        print("  3. 设置环境变量 (OPENAI_API_KEY, ANTHROPIC_API_KEY 等)")
 
     # 创建存储和代理
     store = agl.ParquetStore(
         output_dir=output_dir,
         buffer_size=buffer_size,
-        time_window_minutes=time_window_minutes
+        time_window_minutes=time_window_minutes,
+        trajectory_buffer_size=trajectory_buffer_size,
+        flush_interval_seconds=flush_interval_seconds,
     )
 
     # 保存 store 引用供信号处理使用
@@ -133,7 +178,11 @@ async def main(
     print(f"  Models:     {[m['model_name'] for m in model_list]}")
     print(f"  Output:     {output_dir}")
     print(f"  Buffer:     {buffer_size} (每 {buffer_size} 条记录刷新)")
+    if trajectory_buffer_size > 0:
+        print(f"  Trajectory: {trajectory_buffer_size} (滚动保留条数)")
+        print(f"  Batch Mode: 启用 (每批 {buffer_size} 条，保留 {trajectory_buffer_size // buffer_size} 个批次)")
     print(f"  Time Window: {time_window_minutes} 分钟")
+    print(f"  Flush间隔:  {flush_interval_seconds}s ({flush_interval_seconds // 60}min)")
     if log_file:
         print(f"  HTTP Log:   {log_file}")
     print("=" * 60)
@@ -171,6 +220,10 @@ if __name__ == "__main__":
     parser.add_argument("--time-window", type=int, default=5, dest="time_window_minutes",
                         help="时间窗口分钟数 (默认: 5)")
     parser.add_argument("--log-file", "-l", help="HTTP访问日志文件路径 (JSONL格式)")
+    parser.add_argument("--trajectory-buffer-size", type=int, default=0,
+                        help="总保留数据条数，启用分批存储 (默认: 0, 不启用)")
+    parser.add_argument("--flush-interval", type=int, default=1800,
+                        help="定时 flush 间隔秒数 (默认: 1800 = 30分钟, 0=禁用)")
 
     args = parser.parse_args()
 
@@ -182,4 +235,6 @@ if __name__ == "__main__":
         buffer_size=args.buffer_size,
         time_window_minutes=args.time_window_minutes,
         log_file=args.log_file,
+        trajectory_buffer_size=args.trajectory_buffer_size,
+        flush_interval_seconds=args.flush_interval,
     ))
