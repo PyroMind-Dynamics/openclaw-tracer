@@ -108,6 +108,14 @@ docker-compose up -d
 
 ### 环境变量
 
+#### 代理鉴权（必填）
+
+| 变量 | 是否必填 | 说明 |
+|------|----------|------|
+| `PROXY_API_KEY` | **是** | 代理服务的鉴权密钥 |
+
+**重要：** 如果未设置 `PROXY_API_KEY`，服务将无法启动。
+
 #### 基础配置
 
 | 变量 | 默认值 | 说明 |
@@ -138,6 +146,7 @@ docker-compose up -d
 **使用环境变量示例：**
 
 ```bash
+export PROXY_API_KEY="your-secret-api-key"
 export TARGET_MODEL="my-model"
 export ORIGIN_MODEL="gpt-4"
 export API_MODE="openai"
@@ -154,11 +163,26 @@ python scripts/serve.py
 
 ### 发送请求
 
-使用任何兼容 OpenAI 的客户端：
+使用任何兼容 OpenAI 的客户端，**需要在请求中携带鉴权信息**：
+
+**方式 1: 使用 Authorization Header**
 
 ```bash
 curl http://localhost:43886/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-secret-api-key" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "你好!"}]
+  }'
+```
+
+**方式 2: 使用 X-API-Key Header**
+
+```bash
+curl http://localhost:43886/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-api-key" \
   -d '{
     "model": "gpt-4",
     "messages": [{"role": "user", "content": "你好!"}]
@@ -170,7 +194,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:43886/v1",
-    api_key="dummy"  # SDK 需要但实际不使用
+    api_key="your-secret-api-key"  # 使用 PROXY_API_KEY
 )
 
 response = client.chat.completions.create(
@@ -178,6 +202,8 @@ response = client.chat.completions.create(
     messages=[{"role": "user", "content": "你好!"}]
 )
 ```
+
+**注意：** 以下路径无需鉴权：`/health`、`/status`、`/v1/models`
 
 ### 查看采集的数据
 
@@ -239,11 +265,14 @@ docker run -d \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/logs:/app/logs \
+  -e PROXY_API_KEY="your-secret-api-key" \
   -e PORT=43886 \
   -e BUFFER_SIZE=10 \
   -e TIME_WINDOW_MINUTES=60 \
   your-registry/openclaw-tracer:v1.0.0
 ```
+
+**重要：** 必须设置 `PROXY_API_KEY` 环境变量，否则容器将无法启动。
 
 ### 使用 Docker Compose 配置环境文件
 
@@ -251,6 +280,7 @@ docker run -d \
 ```
 HOST_PORT=43886
 PORT=43886
+PROXY_API_KEY=your-secret-api-key
 BUFFER_SIZE=1
 TIME_WINDOW_MINUTES=30
 ```
