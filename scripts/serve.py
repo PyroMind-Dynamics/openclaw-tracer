@@ -61,6 +61,7 @@ async def main(
     log_file: str | None = None,
     trajectory_buffer_size: int = 0,
     flush_interval_seconds: int = 1800,
+    proxy_api_key: str | None = None,
 ):
     """启动代理服务器
 
@@ -74,7 +75,20 @@ async def main(
         log_file: HTTP访问日志文件路径 (JSONL格式)
         trajectory_buffer_size: 总保留数据条数 (0=不启用分批)
         flush_interval_seconds: 定时 flush 间隔秒数 (默认: 1800 = 30分钟, 0=禁用)
+        proxy_api_key: 代理鉴权密钥 (必填，从环境变量 PROXY_API_KEY 读取)
     """
+    # 获取并校验 PROXY_API_KEY
+    if proxy_api_key is None:
+        proxy_api_key = os.getenv("PROXY_API_KEY")
+
+    if not proxy_api_key:
+        print("✗ 错误: 未设置 PROXY_API_KEY 环境变量")
+        print("  请设置环境变量: export PROXY_API_KEY=your-api-key")
+        print("  或通过参数传入: --proxy-api-key your-api-key")
+        sys.exit(1)
+
+    print(f"✓ 代理鉴权已启用 (PROXY_API_KEY: {proxy_api_key[:8]}...)")
+
     # 加载模型配置
     model_list = []
 
@@ -165,6 +179,7 @@ async def main(
         model_list=model_list,
         store=store,
         log_file=log_file,
+        proxy_api_key=proxy_api_key,
     )
 
     # 启动
@@ -183,6 +198,7 @@ async def main(
         print(f"  Batch Mode: 启用 (每批 {buffer_size} 条，保留 {trajectory_buffer_size // buffer_size} 个批次)")
     print(f"  Time Window: {time_window_minutes} 分钟")
     print(f"  Flush间隔:  {flush_interval_seconds}s ({flush_interval_seconds // 60}min)")
+    print(f"  Auth:       启用 (PROXY_API_KEY)")
     if log_file:
         print(f"  HTTP Log:   {log_file}")
     print("=" * 60)
@@ -224,6 +240,7 @@ if __name__ == "__main__":
                         help="总保留数据条数，启用分批存储 (默认: 0, 不启用)")
     parser.add_argument("--flush-interval", type=int, default=1800,
                         help="定时 flush 间隔秒数 (默认: 1800 = 30分钟, 0=禁用)")
+    parser.add_argument("--proxy-api-key", help="代理鉴权密钥 (默认从环境变量 PROXY_API_KEY 读取)")
 
     args = parser.parse_args()
 
@@ -237,4 +254,5 @@ if __name__ == "__main__":
         log_file=args.log_file,
         trajectory_buffer_size=args.trajectory_buffer_size,
         flush_interval_seconds=args.flush_interval,
+        proxy_api_key=args.proxy_api_key,
     ))

@@ -223,6 +223,102 @@ class HTTPAccessLogger:
             return None
 
 
+class AuthMiddleware:
+    """Middleware to authenticate requests using API Key.
+
+    Supports two authentication methods:
+    1. Authorization: Bearer <API_KEY>
+    2. X-API-Key: <API_KEY>
+
+    Authentication failures return 401 Unauthorized with JSON error response.
+    """
+
+    # Paths that don't require authentication
+    PUBLIC_PATHS = {"/health", "/status", "/v1/models"}
+
+    def __init__(self, api_key: str):
+        """Initialize the authentication middleware.
+
+        Args:
+            api_key: The API key to validate against.
+        """
+        if not api_key:
+            raise ValueError("PROXY_API_KEY must be set and non-empty")
+        self.api_key = api_key
+
+    def _extract_api_key(self, headers: Dict[str, str]) -> Optional[str]:
+        """Extract API key from request headers.
+
+        Args:
+            headers: Request headers dictionary
+
+        Returns:
+            The extracted API key, or None if not found.
+        """
+        # Try Authorization: Bearer <token> header
+        auth_header = headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            return auth_header[7:].strip()  # Remove "Bearer " prefix
+
+        # Try X-API-Key header (case-insensitive)
+        for key, value in headers.items():
+            if key.lower() == "x-api-key":
+                return value.strip()
+
+        return None
+
+    def _create_unauthorized_response(self) -> Dict[str, Any]:
+        """Create the standard 401 Unauthorized error response.
+
+        Returns:
+            Dictionary with error details.
+        """
+        return {
+            "error": {
+                "message": "Unauthorized",
+                "type": "authentication_error",
+                "code": "invalid_api_key"
+            }
+        }
+
+    async def authenticate(
+        self,
+        method: str,
+        path: str,
+        headers: Dict[str, str]
+    ) -> tuple[bool, Optional[Dict[str, Any]]]:
+        """Authenticate a request.
+
+        Args:
+            method: HTTP method
+            path: Request path
+            headers: Request headers
+
+        Returns:
+            Tuple of (is_authenticated, error_response)
+            - If authenticated: (True, None)
+            - If not authenticated: (False, error_response_dict)
+        """
+        # Skip authentication for public paths
+        if path in self.PUBLIC_PATHS:
+            return True, None
+
+        # Extract API key from headers
+        provided_key = self._extract_api_key(headers)
+
+        if provided_key is None:
+            # No API key provided
+            return False, self._create_unauthorized_response()
+
+        if provided_key != self.api_key:
+            # Invalid API key
+            logger.warning(f"[Auth] Invalid API key attempt from path: {path}")
+            return False, self._create_unauthorized_response()
+
+        # Authentication successful
+        return True, None
+
+
 def _to_timestamp(value: Union[datetime, float, int, None]) -> Optional[float]:
     """Convert datetime to Unix timestamp.
 
@@ -832,6 +928,7 @@ class LLMProxy:
         host: str = "0.0.0.0",
         num_workers: int = 1,
         log_file: Optional[str] = None,
+        proxy_api_key: Optional[str] = None,
     ):
         """Initialize the LLM proxy.
 
@@ -842,6 +939,7 @@ class LLMProxy:
             host: Host to bind to.
             num_workers: Number of worker processes.
             log_file: Path to HTTP access log file (JSONL format).
+            proxy_api_key: API key for proxy authentication. Required.
         """
         self.port = port or 43886
         self.host = host
@@ -864,6 +962,14 @@ class LLMProxy:
 
         # HTTP access logger
         self.http_logger = HTTPAccessLogger(log_file)
+
+        # Authentication middleware
+        if proxy_api_key:
+            self.auth_middleware = AuthMiddleware(proxy_api_key)
+            logger.info("[Auth] Authentication enabled")
+        else:
+            self.auth_middleware = None
+            logger.warning("[Auth] No PROXY_API_KEY provided, running without authentication")
 
         # Server state
         self._app: Optional[Any] = None
@@ -1002,19 +1108,20 @@ class LLMProxy:
         logger.info(f"Models available: {[m.get('model_name', m.get('model')) for m in self.model_list]}")
 
     def _setup_http_middleware(self, fastapi_app: Any) -> None:
-        """Set up HTTP logging middleware for the FastAPI app.
+        """Set up HTTP logging and authentication middleware for the FastAPI app.
 
         Args:
             fastapi_app: The FastAPI application instance
         """
         from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.requests import Request as StarletteRequest
-        from starlette.responses import Response as StarletteResponse
+        from starlette.responses import Response as StarletteResponse, JSONResponse
 
         class HTTPLogMiddleware(BaseHTTPMiddleware):
-            def __init__(self, app, http_logger: HTTPAccessLogger):
+            def __init__(self, app, http_logger: HTTPAccessLogger, auth_middleware: Optional[AuthMiddleware] = None):
                 super().__init__(app)
                 self.http_logger = http_logger
+                self.auth_middleware = auth_middleware
 
             async def dispatch(
                 self,
@@ -1028,6 +1135,20 @@ class LLMProxy:
 
                 # Get headers
                 headers = dict(request.headers)
+
+                # Authenticate request if auth middleware is enabled
+                if self.auth_middleware:
+                    is_authenticated, error_response = await self.auth_middleware.authenticate(
+                        method=method,
+                        path=path,
+                        headers=headers
+                    )
+                    if not is_authenticated:
+                        # Return 401 Unauthorized
+                        return JSONResponse(
+                            status_code=401,
+                            content=error_response
+                        )
 
                 # Get body (for POST/PUT/PATCH)
                 body = None
@@ -1082,7 +1203,7 @@ class LLMProxy:
                     raise
 
         # Add middleware to the app
-        fastapi_app.add_middleware(HTTPLogMiddleware, http_logger=self.http_logger)
+        fastapi_app.add_middleware(HTTPLogMiddleware, http_logger=self.http_logger, auth_middleware=self.auth_middleware)
 
     def _register_status_route(self, fastapi_app: Any) -> None:
         """Register the /status endpoint for collection progress.
@@ -1159,6 +1280,7 @@ async def run_proxy(
     port: Optional[int] = None,
     output_dir: str = "data",
     log_file: Optional[str] = None,
+    proxy_api_key: Optional[str] = None,
 ) -> LLMProxy:
     """Run the LLM proxy server.
 
@@ -1167,6 +1289,7 @@ async def run_proxy(
         port: Port to listen on.
         output_dir: Directory for Parquet output.
         log_file: Path to HTTP access log file (JSONL format).
+        proxy_api_key: API key for proxy authentication.
 
     Returns:
         The running LLMProxy instance.
@@ -1179,11 +1302,12 @@ async def run_proxy(
                 "litellm_params": {"model": "openai/gpt-4"},
             }],
             port=43886,
-            log_file="logs/http.jsonl"
+            log_file="logs/http.jsonl",
+            proxy_api_key="your-api-key"
         )
         ```
     """
     store = ParquetStore(output_dir=output_dir)
-    proxy = LLMProxy(port=port, model_list=model_list, store=store, log_file=log_file)
+    proxy = LLMProxy(port=port, model_list=model_list, store=store, log_file=log_file, proxy_api_key=proxy_api_key)
     await proxy.start()
     return proxy

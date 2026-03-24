@@ -108,6 +108,14 @@ Create `config/models.json` with your model configurations:
 
 ### Environment Variables
 
+#### Proxy Authentication (Required)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PROXY_API_KEY` | **Yes** | API key for proxy authentication |
+
+**Important:** The service will not start without `PROXY_API_KEY` set.
+
 #### Basic Configuration
 
 | Variable | Default | Description |
@@ -138,6 +146,7 @@ When `TRAJECTORY_BUFFER_SIZE` is set, data is stored in rolling batches. Old dat
 **Example using environment variables:**
 
 ```bash
+export PROXY_API_KEY="your-secret-api-key"
 export TARGET_MODEL="my-model"
 export ORIGIN_MODEL="gpt-4"
 export API_MODE="openai"
@@ -154,11 +163,26 @@ python scripts/serve.py
 
 ### Sending Requests
 
-Use any OpenAI-compatible client:
+Use any OpenAI-compatible client, **you must include authentication in the request**:
+
+**Method 1: Using Authorization Header**
 
 ```bash
 curl http://localhost:43886/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-secret-api-key" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+**Method 2: Using X-API-Key Header**
+
+```bash
+curl http://localhost:43886/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-api-key" \
   -d '{
     "model": "gpt-4",
     "messages": [{"role": "user", "content": "Hello!"}]
@@ -170,7 +194,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:43886/v1",
-    api_key="dummy"  # Not used but required by SDK
+    api_key="your-secret-api-key"  # Use PROXY_API_KEY
 )
 
 response = client.chat.completions.create(
@@ -178,6 +202,8 @@ response = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello!"}]
 )
 ```
+
+**Note:** The following paths do not require authentication: `/health`, `/status`, `/v1/models`
 
 ### Viewing Collected Data
 
@@ -239,11 +265,14 @@ docker run -d \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/logs:/app/logs \
+  -e PROXY_API_KEY="your-secret-api-key" \
   -e PORT=43886 \
   -e BUFFER_SIZE=10 \
   -e TIME_WINDOW_MINUTES=60 \
   your-registry/openclaw-tracer:v1.0.0
 ```
+
+**Important:** You must set the `PROXY_API_KEY` environment variable, otherwise the container will fail to start.
 
 ### Using Docker Compose with Environment File
 
@@ -251,6 +280,7 @@ Create `.env`:
 ```
 HOST_PORT=43886
 PORT=43886
+PROXY_API_KEY=your-secret-api-key
 BUFFER_SIZE=1
 TIME_WINDOW_MINUTES=30
 ```

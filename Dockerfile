@@ -44,6 +44,9 @@ ENV PATH="/opt/conda/envs/openclaw-tracer/bin:$PATH" \
     BUFFER_SIZE=100 \
     TIME_WINDOW_MINUTES=30
 
+# 代理鉴权密钥 (必填，运行时通过 docker run -e 或 docker-compose 设置)
+# ENV PROXY_API_KEY=your-api-key-here
+
 # 复制项目代码
 COPY openclaw_tracer/ /app/openclaw_tracer/
 COPY scripts/ /app/scripts/
@@ -61,10 +64,8 @@ EXPOSE 43886
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:43886/v1/models || exit 1
 
-# 启动命令（使用shell格式以支持环境变量替换）
-CMD python /app/scripts/serve.py \
-    --config /app/config/models.json \
-    --output-dir /app/data \
-    --port ${PORT} \
-    --buffer-size ${BUFFER_SIZE} \
-    --log-file /app/logs/http.jsonl
+# 设置 docker-entrypoint.sh 可执行权限
+RUN chmod +x /app/scripts/docker-entrypoint.sh
+
+# 启动命令（使用 docker-entrypoint.sh）
+CMD ["/app/scripts/docker-entrypoint.sh"]
