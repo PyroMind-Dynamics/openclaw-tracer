@@ -51,7 +51,7 @@ python scripts/serve.py --config config/models.json --output-dir ./data
 # 构建镜像
 docker build -t openclaw-tracer:latest .
 
-# 运行容器
+# 运行容器（需要先编辑配置文件）
 docker run -d \
   --name openclaw-tracer \
   -p 43886:43886 \
@@ -261,18 +261,45 @@ docker build -t your-registry/openclaw-tracer:v1.0.0 .
 ```bash
 docker run -d \
   --name openclaw-tracer \
-  -p 8080:43886 \
-  -v $(pwd)/config:/app/config:ro \
+  -p 43886:43886 \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  -e PROXY_API_KEY="your-secret-api-key" \
-  -e PORT=43886 \
-  -e BUFFER_SIZE=10 \
-  -e TIME_WINDOW_MINUTES=60 \
-  your-registry/openclaw-tracer:v1.0.0
+  -e TARGET_MODEL="my-exposed-model" \
+  -e ORIGIN_MODEL="gpt-4" \
+  -e API_MODE="openai" \
+  -e API_URL="https://api.openai.com/v1" \
+  -e ACCESS_KEY="sk-xxx" \
+  -e BUFFER_SIZE=100 \
+  -e TRAJECTORY_BUFFER_SIZE=10000 \
+  -e PROXY_API_KEY="your-proxy-api-key" \
+  pyrominddynamics/openclaw-tracer:latest
 ```
 
-**重要：** 必须设置 `PROXY_API_KEY` 环境变量，否则容器将无法启动。
+**环境变量说明：**
+| 变量 | 是否必填 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `TARGET_MODEL` | 是 | - | 暴露给客户端的模型名称 |
+| `ORIGIN_MODEL` | 是 | - | 实际要访问的上游模型 |
+| `API_MODE` | 是 | - | 上游 API 格式 (如 `openai`、`anthropic`、`custom`) |
+| `API_URL` | 是 | - | 上游模型的 API 基础 URL |
+| `ACCESS_KEY` | 是 | - | 上游模型的 API 密钥 |
+| `BUFFER_SIZE` | 否 | `1` | 刷盘前的缓冲区大小（1 = 立即写入） |
+| `TRAJECTORY_BUFFER_SIZE` | 否 | `0` | 缓冲区最大值，超过后清理旧数据（0 = 禁用） |
+| `TIME_WINDOW_MINUTES` | 否 | `30` | 定时刷盘间隔分钟数 |
+| `PROXY_API_KEY` | 是 | - | 代理鉴权密钥 |
+
+**缓冲区行为说明：**
+| 配置 | 行为 |
+|------|------|
+| 两者都为空（默认） | 立即写入模式 - 最安全，崩溃不丢失数据 |
+| `BUFFER_SIZE=100`, `TRAJECTORY_BUFFER_SIZE=0` | 每 100 条记录写入一次，**数据持续累积不清理** |
+| `BUFFER_SIZE=100`, `TRAJECTORY_BUFFER_SIZE=10000` | 批处理模式 - 保留 100 批，自动清理旧数据 |
+
+**注意：** 当 `TRAJECTORY_BUFFER_SIZE=0` 时，旧数据永远不会被删除，会持续累积。如需自动清理旧数据，请设置此值。
+
+**重要提示：**
+- 必须设置 `PROXY_API_KEY`，否则容器将无法启动
+- 必须设置 `API_MODE`，否则代理无法正常工作
+- 默认每 30 分钟自动刷盘一次，防止系统崩溃导致数据丢失（可通过 `TIME_WINDOW_MINUTES` 修改）
 
 ### 使用 Docker Compose 配置环境文件
 

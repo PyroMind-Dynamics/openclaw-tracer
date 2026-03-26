@@ -261,18 +261,45 @@ docker build -t your-registry/openclaw-tracer:v1.0.0 .
 ```bash
 docker run -d \
   --name openclaw-tracer \
-  -p 8080:43886 \
-  -v $(pwd)/config:/app/config:ro \
+  -p 43886:43886 \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  -e PROXY_API_KEY="your-secret-api-key" \
-  -e PORT=43886 \
-  -e BUFFER_SIZE=10 \
-  -e TIME_WINDOW_MINUTES=60 \
-  your-registry/openclaw-tracer:v1.0.0
+  -e TARGET_MODEL="my-exposed-model" \
+  -e ORIGIN_MODEL="gpt-4" \
+  -e API_MODE="openai" \
+  -e API_URL="https://api.openai.com/v1" \
+  -e ACCESS_KEY="sk-xxx" \
+  -e BUFFER_SIZE=100 \
+  -e TRAJECTORY_BUFFER_SIZE=10000 \
+  -e PROXY_API_KEY="your-proxy-api-key" \
+  pyrominddynamics/openclaw-tracer:latest
 ```
 
-**Important:** You must set the `PROXY_API_KEY` environment variable, otherwise the container will fail to start.
+**Environment Variables:**
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TARGET_MODEL` | Yes | - | Model name exposed to clients |
+| `ORIGIN_MODEL` | Yes | - | Actual upstream model to access |
+| `API_MODE` | Yes | - | API format for upstream access (e.g., `openai`, `anthropic`, `custom`) |
+| `API_URL` | Yes | - | Base URL of upstream model API |
+| `ACCESS_KEY` | Yes | - | API key for upstream model |
+| `BUFFER_SIZE` | No | `1` | Buffer size before flushing data (1 = immediate write) |
+| `TRAJECTORY_BUFFER_SIZE` | No | `0` | Max buffer size, old data flushed when exceeded (0 = disabled) |
+| `TIME_WINDOW_MINUTES` | No | `30` | Periodic flush interval in minutes |
+| `PROXY_API_KEY` | Yes | - | API key for proxy authentication |
+
+**Buffer Behavior:**
+| Configuration | Behavior |
+|---------------|----------|
+| Both empty (default) | Immediate write mode - safest, no data loss on crash |
+| `BUFFER_SIZE=100`, `TRAJECTORY_BUFFER_SIZE=0` | Write every 100 records, **data accumulates indefinitely** |
+| `BUFFER_SIZE=100`, `TRAJECTORY_BUFFER_SIZE=10000` | Batch mode - keep 100 batches, old data auto-deleted |
+
+**Note:** When `TRAJECTORY_BUFFER_SIZE=0`, old data will never be deleted and will continue to accumulate. Set this value to enable automatic cleanup of old data.
+
+**Important:**
+- You must set `PROXY_API_KEY`, otherwise the container will fail to start
+- You must set `API_MODE`, otherwise the proxy will not work properly
+- Data is automatically flushed every 30 minutes by default to prevent loss on system crash (configurable via `TIME_WINDOW_MINUTES`)
 
 ### Using Docker Compose with Environment File
 
