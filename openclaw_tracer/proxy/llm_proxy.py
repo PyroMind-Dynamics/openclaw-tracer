@@ -941,7 +941,11 @@ class LLMProxy:
             log_file: Path to HTTP access log file (JSONL format).
             proxy_api_key: API key for proxy authentication. Required.
         """
-        self.port = port or 43886
+        # Pick random port if not specified
+        if port is None:
+            self.port = pick_unused_port()
+        else:
+            self.port = port
         self.host = host
         self.num_workers = num_workers
 

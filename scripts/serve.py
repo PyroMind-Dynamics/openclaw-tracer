@@ -16,7 +16,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-import openclaw_tracer as agl
+import openclaw_tracer
 
 
 # 全局变量用于信号处理
@@ -161,7 +161,7 @@ async def main(
         print("  3. 设置环境变量 (OPENAI_API_KEY, ANTHROPIC_API_KEY 等)")
 
     # 创建存储和代理
-    store = agl.ParquetStore(
+    store = openclaw_tracer.ParquetStore(
         output_dir=output_dir,
         buffer_size=buffer_size,
         time_window_minutes=time_window_minutes,
@@ -173,7 +173,7 @@ async def main(
     global _store_ref
     _store_ref = store
 
-    proxy = agl.LLMProxy(
+    proxy = openclaw_tracer.LLMProxy(
         port=port,
         host=host,
         model_list=model_list,
@@ -238,7 +238,7 @@ if __name__ == "__main__":
     parser.add_argument("--log-file", "-l", help="HTTP访问日志文件路径 (JSONL格式)")
     parser.add_argument("--trajectory-buffer-size", type=int, default=0,
                         help="总保留数据条数，启用分批存储 (默认: 0, 不启用)")
-    parser.add_argument("--flush-interval", type=int, default=1800,
+    parser.add_argument("--flush-interval", type=int, default=1800, dest="flush_interval_seconds",
                         help="定时 flush 间隔秒数 (默认: 1800 = 30分钟, 0=禁用)")
     parser.add_argument("--proxy-api-key", help="代理鉴权密钥 (默认从环境变量 PROXY_API_KEY 读取)")
 
@@ -253,6 +253,6 @@ if __name__ == "__main__":
         time_window_minutes=args.time_window_minutes,
         log_file=args.log_file,
         trajectory_buffer_size=args.trajectory_buffer_size,
-        flush_interval_seconds=args.flush_interval,
+        flush_interval_seconds=args.flush_interval_seconds,
         proxy_api_key=args.proxy_api_key,
     ))
