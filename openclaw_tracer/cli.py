@@ -20,7 +20,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version="0.1.2")
 def cli():
     """OpenClaw-Tracer - LLM data collection for SFT and RL training."""
     pass
