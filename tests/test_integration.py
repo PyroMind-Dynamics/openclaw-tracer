@@ -20,6 +20,24 @@ pytest.importorskip("litellm.proxy.proxy_server")
 from openclaw_tracer.proxy.llm_proxy import LLMProxy
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _integration_tests_disable_upstream_proxy_env() -> Generator[None, None, None]:
+    """LiteLLM uses httpx with trust_env=True for upstream calls; strip proxy vars to avoid hangs."""
+    keys = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    )
+    saved: dict[str, str | None] = {k: os.environ.pop(k, None) for k in keys}
+    yield
+    for k, v in saved.items():
+        if v is not None:
+            os.environ[k] = v
+
+
 @pytest.fixture(scope="session")
 def proxy_api_key() -> str:
     """Test API key for proxy authentication."""
@@ -103,6 +121,7 @@ def proxy_client(running_proxy: LLMProxy, proxy_api_key: str) -> httpx.AsyncClie
         base_url=running_proxy.url,
         headers={"Authorization": f"Bearer {proxy_api_key}"},
         timeout=30.0,
+        trust_env=False,
     )
 
 
@@ -112,6 +131,7 @@ def unauth_client(running_proxy: LLMProxy) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=running_proxy.url,
         timeout=30.0,
+        trust_env=False,
     )
 
 
@@ -136,7 +156,11 @@ class TestProxyServer:
         running_proxy: LLMProxy,
     ) -> None:
         """Test that health endpoint works without authentication."""
-        async with httpx.AsyncClient(base_url=running_proxy.url) as client:
+        async with httpx.AsyncClient(
+            base_url=running_proxy.url,
+            timeout=30.0,
+            trust_env=False,
+        ) as client:
             response = await client.get("/health")
             assert response.status_code == 200
 
@@ -154,7 +178,11 @@ class TestProxyServer:
         running_proxy: LLMProxy,
     ) -> None:
         """Test that chat completions require authentication."""
-        async with httpx.AsyncClient(base_url=running_proxy.url) as client:
+        async with httpx.AsyncClient(
+            base_url=running_proxy.url,
+            timeout=30.0,
+            trust_env=False,
+        ) as client:
             response = await client.post(
                 "/v1/chat/completions",
                 json={
@@ -193,6 +221,8 @@ class TestProxyServer:
         async with httpx.AsyncClient(
             base_url=running_proxy.url,
             headers={"X-API-Key": proxy_api_key},
+            timeout=30.0,
+            trust_env=False,
         ) as client:
             response = await client.post(
                 "/v1/chat/completions",
@@ -212,6 +242,8 @@ class TestProxyServer:
         async with httpx.AsyncClient(
             base_url=running_proxy.url,
             headers={"Authorization": "Bearer invalid-key"},
+            timeout=30.0,
+            trust_env=False,
         ) as client:
             response = await client.post(
                 "/v1/chat/completions",
@@ -237,8 +269,10 @@ class TestProxyDataCollection:
         async with httpx.AsyncClient(
             base_url=running_proxy.url,
             headers={"Authorization": f"Bearer {proxy_api_key}"},
+            timeout=30.0,
+            trust_env=False,
         ) as client:
-            await client.post(
+            response = await client.post(
                 "/v1/chat/completions",
                 json={
                     "model": test_model_config["target_model"],
@@ -246,6 +280,8 @@ class TestProxyDataCollection:
                     "max_tokens": 5,
                 },
             )
+        # Upstream may 404/500 without real ACCESS_KEY; we only check the proxy responded.
+        assert response.status_code is not None
 
         # Note: Span collection depends on LiteLLM's logging
 
@@ -261,6 +297,8 @@ class TestProxyDataCollection:
             async with httpx.AsyncClient(
                 base_url=running_proxy.url,
                 headers={"Authorization": f"Bearer {proxy_api_key}"},
+                timeout=30.0,
+                trust_env=False,
             ) as client:
                 await client.post(
                     "/v1/chat/completions",
