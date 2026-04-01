@@ -906,6 +906,8 @@ class LLMProxy:
 
     This class wraps LiteLLM's proxy server with custom logging to capture
     all LLM requests and responses for training data collection.
+    
+    LiteLLM 使用全局 app，重复 start 只保证不崩，不保证更新中间件配置
 
     Usage:
         ```python
@@ -1057,10 +1059,13 @@ class LLMProxy:
         try:
             # Load config into proxy
             from litellm.proxy import proxy_server
-            new_router, models, _ = await proxy_config.load_config(None, config_file)
+            new_router, model_list_result, _ = await proxy_config.load_config(None, config_file)
 
             # Set the new router to proxy_server
             proxy_server.llm_router = new_router
+            # LiteLLM /health expects this global; load_config returns the list but does not
+            # always publish it to proxy_server.llm_model_list when embedded programmatically.
+            proxy_server.llm_model_list = model_list_result
 
             logger.info(f"Loaded {len(self.model_list)} model(s) from config")
         finally:
@@ -1117,6 +1122,10 @@ class LLMProxy:
         Args:
             fastapi_app: The FastAPI application instance
         """
+        if getattr(fastapi_app.state, "openclaw_http_middleware_installed", False):
+            logger.debug("HTTP middleware already installed on LiteLLM app; skipping add_middleware")
+            return
+
         from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.requests import Request as StarletteRequest
         from starlette.responses import Response as StarletteResponse, JSONResponse
@@ -1208,6 +1217,7 @@ class LLMProxy:
 
         # Add middleware to the app
         fastapi_app.add_middleware(HTTPLogMiddleware, http_logger=self.http_logger, auth_middleware=self.auth_middleware)
+        fastapi_app.state.openclaw_http_middleware_installed = True
 
     def _register_status_route(self, fastapi_app: Any) -> None:
         """Register the /status endpoint for collection progress.
@@ -1215,6 +1225,9 @@ class LLMProxy:
         Args:
             fastapi_app: The FastAPI application instance
         """
+        if getattr(fastapi_app.state, "openclaw_status_route_registered", False):
+            return
+
         store = self.store
 
         @fastapi_app.get("/status")
@@ -1222,6 +1235,8 @@ class LLMProxy:
             if hasattr(store, "get_collection_status"):
                 return store.get_collection_status()
             return {"error": "Status not available for this storage backend"}
+
+        fastapi_app.state.openclaw_status_route_registered = True
 
     async def stop(self) -> None:
         """Stop the proxy server."""
