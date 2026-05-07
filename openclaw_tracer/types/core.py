@@ -166,6 +166,9 @@ class Span(BaseModel):
     sequence_id: int = 0
     """The sequence number within the attempt."""
 
+    previous_reward: Optional[float] = None
+    """The reward value from the previous step, used for RL training."""
+
     @property
     def duration(self) -> Optional[float]:
         """Get the span duration in seconds."""
