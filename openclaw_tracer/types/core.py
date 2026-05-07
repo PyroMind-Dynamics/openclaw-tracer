@@ -169,6 +169,9 @@ class Span(BaseModel):
     previous_reward: Optional[float] = None
     """The reward value from the previous step, used for RL training."""
 
+    final_reward: Optional[float] = None
+    """Episode-level reward set when the client calls ``/end_task`` (stored in Parquet)."""
+
     @property
     def duration(self) -> Optional[float]:
         """Get the span duration in seconds."""

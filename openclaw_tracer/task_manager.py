@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from time import time
 from typing import Dict, Optional
@@ -74,10 +75,8 @@ class TaskManager:
         """
         async with self._lock:
             if task_id is None:
-                # Generate a unique task ID
-                current_task = asyncio.current_task()
-                task_name = current_task.get_name() if current_task else "unknown"
-                task_id = f"auto-{task_name}-{int(asyncio.get_event_loop().time())}"
+                # Short, stable ID for traces (avoid asyncio task names like Starlette coro-*).
+                task_id = f"auto-{uuid.uuid4().hex}"
 
             state = self._tasks.get(task_id)
             if state is None:

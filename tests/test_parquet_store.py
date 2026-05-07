@@ -654,3 +654,54 @@ class TestParquetStoreClose:
         """Test that close can be called multiple times."""
         await async_parquet_store.close()
         await async_parquet_store.close()  # Should not raise
+
+
+class TestApplyRolloutFinalReward:
+    """Tests for POST /end_task persistence via ``apply_rollout_final_reward``."""
+
+    @pytest.mark.asyncio
+    async def test_writes_final_reward_to_parquet(
+        self,
+        temp_dir: Path,
+        sample_span: Span,
+    ) -> None:
+        store = ParquetStore(
+            output_dir=temp_dir / "data",
+            buffer_size=1,
+            auto_flush=True,
+        )
+        rid = "task-with-final-reward"
+        span = sample_span.model_copy(update={"rollout_id": rid})
+        await store.add_span(span)
+        await store.apply_rollout_final_reward(rid, 0.875)
+
+        spans_dir = temp_dir / "data" / "spans"
+        parquet_files = list(spans_dir.glob("*.parquet"))
+        assert len(parquet_files) == 1
+        df = pd.read_parquet(parquet_files[0])
+        assert "final_reward" in df.columns
+        assert df["final_reward"].notna().all()
+        assert float(df["final_reward"].iloc[0]) == pytest.approx(0.875)
+
+    @pytest.mark.asyncio
+    async def test_updates_buffer_before_flush(
+        self,
+        temp_dir: Path,
+        sample_span: Span,
+    ) -> None:
+        store = ParquetStore(
+            output_dir=temp_dir / "data",
+            buffer_size=10,
+            auto_flush=False,
+        )
+        rid = "buffered-rollout"
+        span = sample_span.model_copy(update={"rollout_id": rid})
+        await store.add_span(span)
+        await store.apply_rollout_final_reward(rid, -0.25)
+        await store.flush()
+
+        spans_dir = temp_dir / "data" / "spans"
+        parquet_files = list(spans_dir.glob("*.parquet"))
+        assert len(parquet_files) == 1
+        df = pd.read_parquet(parquet_files[0])
+        assert float(df["final_reward"].iloc[0]) == pytest.approx(-0.25)

@@ -1374,6 +1374,9 @@ class LLMProxy:
                     status_code=404
                 )
 
+            if isinstance(self.store, ParquetStore):
+                await self.store.apply_rollout_final_reward(stats.task_id, stats.final_reward)
+
             return JSONResponse(
                 {
                     "task_id": stats.task_id,
