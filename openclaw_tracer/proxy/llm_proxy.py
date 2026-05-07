@@ -29,6 +29,7 @@ except ImportError:
 
 from openclaw_tracer.storage.base import StorageBackend
 from openclaw_tracer.storage.parquet_store import ParquetStore
+from openclaw_tracer.task_manager import TaskManager
 from openclaw_tracer.types.core import (
     Attributes,
     Resource,
@@ -959,6 +960,7 @@ class LLMProxy:
         num_workers: int = 1,
         log_file: Optional[str] = None,
         proxy_api_key: Optional[str] = None,
+        task_timeout_minutes: int = 10,
     ):
         """Initialize the LLM proxy.
 
@@ -970,6 +972,7 @@ class LLMProxy:
             num_workers: Number of worker processes.
             log_file: Path to HTTP access log file (JSONL format).
             proxy_api_key: API key for proxy authentication. Required.
+            task_timeout_minutes: Minutes of inactivity before a task is cleaned up.
         """
         # Pick random port if not specified
         if port is None:
@@ -1004,6 +1007,10 @@ class LLMProxy:
         else:
             self.auth_middleware = None
             logger.warning("[Auth] No PROXY_API_KEY provided, running without authentication")
+
+        # Task Manager for session management
+        self.task_manager = TaskManager(timeout_minutes=task_timeout_minutes)
+        logger.info(f"[TaskManager] Initialized with timeout={task_timeout_minutes}min")
 
         # Server state
         self._app: Optional[Any] = None
@@ -1061,6 +1068,9 @@ class LLMProxy:
 
         logger.info(f"Starting LLM proxy on {self.host}:{self.port}")
 
+        # Start TaskManager
+        await self.task_manager.start()
+
         if self.http_logger.log_file:
             logger.info(f"HTTP access log: {self.http_logger.log_file}")
 
@@ -1113,7 +1123,7 @@ class LLMProxy:
 
         logger.info(f"Request sanitizer enabled for models: {self.request_sanitizer.sanitize_models}")
 
-        # Add HTTP logging middleware
+        # Add HTTP logging middleware (includes TaskMiddleware)
         self._setup_http_middleware(app)
 
         # Register /status endpoint for collection progress
@@ -1157,6 +1167,11 @@ class LLMProxy:
         from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.requests import Request as StarletteRequest
         from starlette.responses import Response as StarletteResponse, JSONResponse
+
+        # Import and add TaskMiddleware FIRST (before auth/logging to extract headers)
+        from openclaw_tracer.middleware.task_middleware import TaskMiddleware
+        fastapi_app.add_middleware(TaskMiddleware, task_manager=self.task_manager)
+        logger.info("[TaskMiddleware] Added to middleware chain")
 
         class HTTPLogMiddleware(BaseHTTPMiddleware):
             def __init__(self, app, http_logger: HTTPAccessLogger, auth_middleware: Optional[AuthMiddleware] = None):
@@ -1279,6 +1294,9 @@ class LLMProxy:
         if self._server_task:
             await self._server_task
 
+        # Stop TaskManager
+        await self.task_manager.stop()
+
         # Flush storage
         await self.store.flush()
 
@@ -1328,6 +1346,7 @@ async def run_proxy(
     output_dir: str = "data",
     log_file: Optional[str] = None,
     proxy_api_key: Optional[str] = None,
+    task_timeout_minutes: int = 10,
 ) -> LLMProxy:
     """Run the LLM proxy server.
 
@@ -1337,6 +1356,7 @@ async def run_proxy(
         output_dir: Directory for Parquet output.
         log_file: Path to HTTP access log file (JSONL format).
         proxy_api_key: API key for proxy authentication.
+        task_timeout_minutes: Minutes of inactivity before a task is cleaned up.
 
     Returns:
         The running LLMProxy instance.
@@ -1355,6 +1375,13 @@ async def run_proxy(
         ```
     """
     store = ParquetStore(output_dir=output_dir)
-    proxy = LLMProxy(port=port, model_list=model_list, store=store, log_file=log_file, proxy_api_key=proxy_api_key)
+    proxy = LLMProxy(
+        port=port,
+        model_list=model_list,
+        store=store,
+        log_file=log_file,
+        proxy_api_key=proxy_api_key,
+        task_timeout_minutes=task_timeout_minutes,
+    )
     await proxy.start()
     return proxy
