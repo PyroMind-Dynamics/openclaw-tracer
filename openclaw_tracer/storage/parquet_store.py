@@ -23,6 +23,25 @@ from openclaw_tracer.types.core import Span
 logger = logging.getLogger(__name__)
 
 
+# PyArrow schema for span data with explicit types
+_SPAN_SCHEMA = pa.schema([
+    ("name", pa.string()),
+    ("trace_id", pa.string()),
+    ("span_id", pa.string()),
+    ("parent_id", pa.string()),
+    ("start_time", pa.float64()),
+    ("end_time", pa.float64()),
+    ("kind", pa.string()),
+    ("status", pa.string()),
+    ("attributes", pa.string()),
+    ("rollout_id", pa.string()),
+    ("attempt_id", pa.string()),
+    ("sequence_id", pa.int64()),
+    ("resource_attributes", pa.string()),
+    ("previous_reward", pa.float64()),
+])
+
+
 def _get_time_window(interval_minutes: int = 30) -> str:
     """Get the current time window identifier.
 
@@ -363,7 +382,9 @@ class ParquetStore(StorageBackend):
             existing_df = pq.read_table(spans_path).to_pandas()
             df = pd.concat([existing_df, df], ignore_index=True)
 
-        df.to_parquet(spans_path, index=False)
+        # Convert to PyArrow table with explicit schema before writing
+        table = pa.Table.from_pandas(df, schema=_SPAN_SCHEMA, preserve_index=False)
+        pq.write_table(table, spans_path)
         self._stats["spans_flushed"] += len(self._span_buffer)
         if new_window or not spans_path.exists():
             self._stats["span_files_created"] += 1
@@ -429,6 +450,7 @@ class ParquetStore(StorageBackend):
             "attempt_id": span.attempt_id,
             "sequence_id": span.sequence_id,
             "resource_attributes": json.dumps(span.resource.attributes),
+            "previous_reward": span.previous_reward,
         }
 
     def _dict_to_span(self, d: Dict[str, Any]) -> Span:
@@ -456,4 +478,5 @@ class ParquetStore(StorageBackend):
             attempt_id=d["attempt_id"],
             sequence_id=d.get("sequence_id", 0),
             resource=Resource(attributes=json.loads(d.get("resource_attributes", "{}"))),
+            previous_reward=d.get("previous_reward"),
         )
