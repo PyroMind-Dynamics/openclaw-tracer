@@ -15,6 +15,58 @@ OpenClaw-Tracer is a lightweight LLM data collection and tracing service for **O
 - **Docker‑friendly deployment**: Simple to run locally or in production with Docker / Docker Compose
 - **Configurable buffering**: Tune buffering for immediate or batched writes depending on your workload
 
+## Task 追踪功能
+
+OpenClaw-Tracer 支持 task 追踪和奖励信号捕获，用于 RL 训练数据收集。
+
+### 请求头
+
+| 请求头 | 类型 | 必填 | 描述 |
+|--------|------|------|------|
+| `X-Task-ID` | string | 否 | 任务标识符，用作 rollout_id |
+| `X-Previous-Reward` | float | 否 | 上一步的奖励值 |
+
+### 示例
+
+```bash
+curl http://localhost:43886/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-proxy-key" \
+  -H "X-Task-ID: my-task-123" \
+  -H "X-Previous-Reward: 0.85" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### API 端点
+
+#### GET /tracer-version
+
+获取 tracer 版本信息（无需认证）。
+
+```bash
+curl http://localhost:43886/tracer-version
+```
+
+#### POST /end_task
+
+结束指定 task 会话。
+
+```bash
+curl -X POST http://localhost:43886/end_task \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-proxy-key" \
+  -d '{"task_id": "my-task-123"}'
+```
+
+### 环境变量
+
+| 变量 | 默认值 | 描述 |
+|------|--------|------|
+| `TASK_TIMEOUT_MINUTES` | 10 | task 超时时间（分钟） |
+
 ## Architecture
 
 ```
