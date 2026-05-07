@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 from uuid import uuid4
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.proxy.proxy_server import app, save_worker_config
 try:
@@ -1288,6 +1291,41 @@ class LLMProxy:
                 "version": __version__,
                 "features": ["task-tracking", "reward-tracking"],
             }
+
+        @fastapi_app.post("/end_task")
+        async def end_task(request: Request) -> JSONResponse:
+            """End a task and return its statistics."""
+            try:
+                body = await request.json()
+            except json.JSONDecodeError:
+                return JSONResponse(
+                    {"error": "Invalid JSON body"},
+                    status_code=400
+                )
+
+            task_id = body.get("task_id")
+            if not task_id:
+                return JSONResponse(
+                    {"error": "task_id is required"},
+                    status_code=400
+                )
+
+            stats = await self.task_manager.end_task(task_id)
+            if stats is None:
+                return JSONResponse(
+                    {"error": "Task not found", "task_id": task_id},
+                    status_code=404
+                )
+
+            return JSONResponse(
+                {
+                    "task_id": stats.task_id,
+                    "attempt_count": stats.attempt_count,
+                    "total_requests": stats.total_requests,
+                    "duration_seconds": stats.duration_seconds,
+                },
+                status_code=200
+            )
 
         fastapi_app.state.openclaw_status_route_registered = True
 
