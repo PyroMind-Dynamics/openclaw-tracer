@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -38,6 +39,9 @@ from openclaw_tracer.types.core import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Context variables for passing task information through LiteLLM callbacks
+task_context: contextvars.ContextVar[dict] = contextvars.ContextVar("task_context", default=None)
 
 # Setup diagnostic logger for response debugging
 diagnostic_logger = logging.getLogger("diagnostic")
@@ -489,6 +493,11 @@ class SpanLogger(CustomLogger):
         - Usage statistics
         """
         try:
+            # Get task context from contextvars
+            ctx = task_context.get() or {}
+            task_id = ctx.get("task_id")
+            attempt_id = ctx.get("attempt_id")
+            previous_reward = ctx.get("previous_reward")
             # Debug: log what we received
             logger.debug(f"async_log_success_event kwargs type: {type(kwargs)}")
             logger.debug(f"async_log_success_event kwargs keys: {kwargs.keys() if isinstance(kwargs, dict) else 'not a dict'}")
@@ -812,6 +821,7 @@ class SpanLogger(CustomLogger):
                 kind=SpanKind.CLIENT,
                 status="OK",
                 attributes=attributes,
+                previous_reward=previous_reward,
                 resource=Resource(
                     attributes={
                         "service.name": "openclaw-tracer",
@@ -819,6 +829,12 @@ class SpanLogger(CustomLogger):
                     }
                 ),
             )
+
+            # Override rollout_id and attempt_id from task context
+            if task_id:
+                span.rollout_id = task_id
+            if attempt_id:
+                span.attempt_id = attempt_id
 
             # Store the span
             await self.store.add_span(span)
@@ -832,6 +848,11 @@ class SpanLogger(CustomLogger):
         Still captures complete conversation data for debugging.
         """
         try:
+            # Get task context from contextvars
+            ctx = task_context.get() or {}
+            task_id = ctx.get("task_id")
+            attempt_id = ctx.get("attempt_id")
+            previous_reward = ctx.get("previous_reward")
             # Extract data from kwargs - same logic as success event
             data = {}
             messages = []
@@ -887,6 +908,7 @@ class SpanLogger(CustomLogger):
                 kind=SpanKind.CLIENT,
                 status="ERROR",
                 attributes=attributes,
+                previous_reward=previous_reward,
                 resource=Resource(
                     attributes={
                         "service.name": "openclaw-tracer",
@@ -894,6 +916,12 @@ class SpanLogger(CustomLogger):
                     }
                 ),
             )
+
+            # Override rollout_id and attempt_id from task context
+            if task_id:
+                span.rollout_id = task_id
+            if attempt_id:
+                span.attempt_id = attempt_id
 
             await self.store.add_span(span)
 

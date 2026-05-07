@@ -7,6 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 
 from openclaw_tracer.task_manager import TaskManager
+from openclaw_tracer.proxy.llm_proxy import task_context
 
 logger = logging.getLogger(__name__)
 
@@ -54,19 +55,31 @@ class TaskMiddleware(BaseHTTPMiddleware):
         # Get or create attempt from TaskManager
         final_task_id, attempt_id = await self.task_manager.get_or_create_attempt(task_id)
 
-        # Store in request.state for SpanLogger to access
+        # Store in request.state for any code that needs direct access
         request.state[self.STATE_TASK_ID] = final_task_id
         request.state[self.STATE_ATTEMPT_ID] = attempt_id
         request.state[self.STATE_PREVIOUS_REWARD] = previous_reward
+
+        # Store to context variable (so SpanLogger can access it via contextvars)
+        context_data = {
+            "task_id": final_task_id,
+            "attempt_id": attempt_id,
+            "previous_reward": previous_reward,
+        }
+        token = task_context.set(context_data)
 
         logger.debug(
             f"[TaskMiddleware] task_id={final_task_id}, "
             f"attempt_id={attempt_id}, previous_reward={previous_reward}"
         )
 
-        # Continue with request processing
-        response = await call_next(request)
-        return response
+        try:
+            # Continue with request processing
+            response = await call_next(request)
+            return response
+        finally:
+            # Reset the context variable to avoid leaks
+            task_context.reset(token)
 
     def _extract_header(self, headers: dict, header_name: str) -> Optional[str]:
         """Extract header value (case-insensitive).
