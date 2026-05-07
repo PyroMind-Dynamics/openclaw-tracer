@@ -175,3 +175,39 @@ class Span(BaseModel):
         if self.end_time is None:
             return None
         return self.end_time - self.start_time
+
+
+# ========== Training Record Types (Stubs for Future Implementation) ==========
+
+
+class RLRecord(BaseModel):
+    """Record for Reinforcement Learning training data.
+
+    This is a stub type for future implementation. Add fields as needed.
+    """
+
+    rollout_id: str = ""
+    attempt_id: str = ""
+    query: str = ""
+    response: str = ""
+    trajectory: list = []
+    reward: Optional[float] = 0.0
+    model: str = ""
+    timestamp: str = ""
+
+
+class SFTRecord(BaseModel):
+    """Record for Supervised Fine-Tuning training data.
+
+    This is a stub type for future implementation. Add fields as needed.
+    """
+
+    id: str = ""
+    prompt: str = ""
+    response: str = ""
+    model: str = ""
+    timestamp: str = ""
+    thought_chain: Optional[str] = ""
+    prompt_tokens: Optional[int] = 0
+    completion_tokens: Optional[int] = 0
+    total_tokens: Optional[int] = 0

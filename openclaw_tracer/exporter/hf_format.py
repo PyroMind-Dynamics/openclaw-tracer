@@ -48,7 +48,7 @@ class HFExporter(DataExporter):
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Convert records to dict format
-        data = {
+        data: Dict[str, List[Any]] = {
             "id": [r.id for r in records],
             "prompt": [r.prompt for r in records],
             "response": [r.response for r in records],

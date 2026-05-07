@@ -108,6 +108,15 @@ class TestTaskManager:
         assert stats.attempt_count == 2
         assert stats.total_requests == 2
         assert stats.duration_seconds >= 0
+        assert stats.final_reward is None
+
+    @pytest.mark.asyncio
+    async def test_end_task_with_final_reward(self, manager):
+        """Test ending a task can attach an episode final reward."""
+        await manager.get_or_create_attempt("test-task-reward")
+        stats = await manager.end_task("test-task-reward", final_reward=0.75)
+        assert stats is not None
+        assert stats.final_reward == 0.75
 
     @pytest.mark.asyncio
     async def test_end_task_nonexistent_returns_none(self, manager):

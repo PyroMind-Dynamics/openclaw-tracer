@@ -131,7 +131,7 @@ class TRLExporter(DataExporter):
                 last_span = record.trajectory[-1]
                 response = last_span.attributes.get("llm.response.content", "")
 
-            row = {
+            row: Dict[str, Any] = {
                 "query": query or "",
                 "response": response or "",
                 "rollout_id": record.rollout_id,

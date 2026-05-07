@@ -39,18 +39,18 @@ def _integration_tests_disable_upstream_proxy_env() -> Generator[None, None, Non
 
 
 @pytest.fixture
-def temp_store_dir() -> Generator[Path, None, None]:
-    """Create a temporary directory for test data."""
+def task_tracking_temp_dir() -> Generator[Path, None, None]:
+    """Create a temporary directory for task tracking test data."""
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
 
 
 @pytest.fixture
-async def proxy_with_task_tracking(temp_store_dir: Path) -> AsyncGenerator[LLMProxy, None]:
+async def proxy_with_task_tracking(task_tracking_temp_dir: Path) -> AsyncGenerator[LLMProxy, None]:
     """Create a proxy with task tracking enabled."""
     store = ParquetStore(
-        output_dir=temp_store_dir / "data",
+        output_dir=task_tracking_temp_dir / "data",
         buffer_size=1,
         auto_flush=True,
     )
@@ -68,7 +68,7 @@ async def proxy_with_task_tracking(temp_store_dir: Path) -> AsyncGenerator[LLMPr
         host="127.0.0.1",
         model_list=model_list,
         store=store,
-        proxy_api_key="test-key",
+        proxy_api_key="test-proxy-key-12345",  # Use same key as test_integration.py to avoid middleware conflicts
         task_timeout_minutes=10,
     )
 
@@ -87,7 +87,7 @@ async def authenticated_client(proxy_with_task_tracking: LLMProxy) -> AsyncGener
     """Create an authenticated HTTP client for the proxy."""
     async with AsyncClient(
         base_url=proxy_with_task_tracking.url,
-        headers={"Authorization": "Bearer test-key"},
+        headers={"Authorization": "Bearer test-proxy-key-12345"},  # Use same key as test_integration.py
         timeout=30.0,
         trust_env=False,
     ) as client:
@@ -209,6 +209,50 @@ class TestTaskTrackingIntegration:
         assert "duration_seconds" in data
         assert data["attempt_count"] >= 1
         assert data["total_requests"] >= 1
+        assert data.get("final_reward") is None
+
+    @pytest.mark.asyncio
+    async def test_end_task_with_final_reward(self, authenticated_client: AsyncClient):
+        """POST /end_task accepts final_reward (and alias reward)."""
+        task_id = "integration-final-reward-task"
+        response = await authenticated_client.get(
+            "/v1/models",
+            headers={"X-Task-ID": task_id},
+        )
+        assert response.status_code == 200
+        await asyncio.sleep(0.1)
+
+        end_response = await authenticated_client.post(
+            "/end_task",
+            json={"task_id": task_id, "final_reward": 1.25},
+        )
+        assert end_response.status_code == 200
+        data = end_response.json()
+        assert data["task_id"] == task_id
+        assert data["final_reward"] == 1.25
+
+    @pytest.mark.asyncio
+    async def test_end_task_final_reward_alias_reward(self, authenticated_client: AsyncClient):
+        task_id = "integration-reward-alias-task"
+        await authenticated_client.get("/v1/models", headers={"X-Task-ID": task_id})
+        await asyncio.sleep(0.1)
+        end_response = await authenticated_client.post(
+            "/end_task",
+            json={"task_id": task_id, "reward": -0.5},
+        )
+        assert end_response.status_code == 200
+        assert end_response.json()["final_reward"] == -0.5
+
+    @pytest.mark.asyncio
+    async def test_end_task_invalid_final_reward(self, authenticated_client: AsyncClient):
+        task_id = "integration-invalid-reward-task"
+        await authenticated_client.get("/v1/models", headers={"X-Task-ID": task_id})
+        await asyncio.sleep(0.1)
+        end_response = await authenticated_client.post(
+            "/end_task",
+            json={"task_id": task_id, "final_reward": "not-a-number"},
+        )
+        assert end_response.status_code == 400
 
     @pytest.mark.asyncio
     async def test_task_multiple_attempts(self, authenticated_client: AsyncClient):
@@ -237,6 +281,7 @@ class TestTaskTrackingIntegration:
         assert data["task_id"] == task_id
         assert data["attempt_count"] == 3
         assert data["total_requests"] == 3
+        assert data.get("final_reward") is None
 
     @pytest.mark.asyncio
     async def test_task_with_previous_reward_header(self, authenticated_client: AsyncClient):
@@ -295,53 +340,55 @@ class TestTaskTimeout:
     """Tests for task timeout functionality."""
 
     @pytest.mark.asyncio
-    async def test_task_timeout_cleanup_short_timeout(self, temp_store_dir: Path):
+    async def test_task_timeout_cleanup_short_timeout(self):
         """Test that tasks are cleaned up after short timeout."""
-        # Create a proxy with very short timeout
-        store = ParquetStore(
-            output_dir=temp_store_dir / "data-timeout",
-            buffer_size=1,
-            auto_flush=True,
-        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a proxy with very short timeout
+            store = ParquetStore(
+                output_dir=Path(tmpdir) / "data-timeout",
+                buffer_size=1,
+                auto_flush=True,
+            )
 
-        proxy = LLMProxy(
-            port=None,
-            host="127.0.0.1",
-            model_list=[{
-                "model_name": "test-model",
-                "litellm_params": {
-                    "model": "openai/gpt-3.5-turbo",
-                    "api_key": "test-key",
-                },
-            }],
-            store=store,
-            proxy_api_key="test-key",
-            task_timeout_minutes=0,  # Immediate timeout for testing
-        )
+            proxy = LLMProxy(
+                port=None,
+                host="127.0.0.1",
+                model_list=[{
+                    "model_name": "test-model",
+                    "litellm_params": {
+                        "model": "openai/gpt-3.5-turbo",
+                        "api_key": "test-key",
+                    },
+                }],
+                store=store,
+                proxy_api_key="test-proxy-key-12345",  # Use same key as test_integration.py
+                task_timeout_minutes=0,  # Immediate timeout for testing
+            )
 
-        await proxy.start()
-        await asyncio.sleep(0.2)
+            await proxy.start()
+            await asyncio.sleep(0.2)
 
-        try:
-            task_id = "timeout-test-task"
+            try:
+                task_id = "timeout-test-task"
 
-            async with AsyncClient(
-                base_url=proxy.url,
-                headers={"Authorization": "Bearer test-key"},
-                timeout=30.0,
-            ) as client:
-                # Create a task
-                response = await client.get(
-                    "/v1/models",
-                    headers={"X-Task-ID": task_id},
-                )
-                assert response.status_code == 200
+                async with AsyncClient(
+                    base_url=proxy.url,
+                    headers={"Authorization": "Bearer test-proxy-key-12345"},
+                    timeout=30.0,
+                ) as client:
+                    # Create a task
+                    response = await client.get(
+                        "/v1/models",
+                        headers={"X-Task-ID": task_id},
+                    )
+                    assert response.status_code == 200
 
-                # Wait for cleanup (cleanup runs every 60s, so we skip this test)
-                # In a real scenario, we'd need to expose internal state or wait longer
+                    # Wait for cleanup (cleanup runs every 60s, so we skip this test)
+                    # In a real scenario, we'd need to expose internal state or wait longer
 
-            # Verify proxy is still running
-            assert proxy.is_running
-        finally:
-            await proxy.stop()
-            await store.close()
+                # Verify proxy is still running
+                assert proxy.is_running
+            finally:
+                await proxy.stop()
+                await store.close()

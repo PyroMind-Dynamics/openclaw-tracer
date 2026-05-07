@@ -10,7 +10,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Union
 from uuid import uuid4
 
 from starlette.requests import Request
@@ -30,6 +30,11 @@ except ImportError:
             port = s.getsockname()[1]
         return port
 
+from openclaw_tracer.proxy.http_proxy_env import active_upstream_proxy_summary, apply_upstream_proxy_env
+from openclaw_tracer.proxy.image_externalize import (
+    externalize_inline_images_for_span,
+    redact_data_url_images_in_json_body_for_log,
+)
 from openclaw_tracer.storage.base import StorageBackend
 from openclaw_tracer.storage.parquet_store import ParquetStore
 from openclaw_tracer.task_manager import TaskManager
@@ -45,7 +50,7 @@ from openclaw_tracer.types.core import (
 logger = logging.getLogger(__name__)
 
 # Context variables for passing task information through LiteLLM callbacks
-task_context: contextvars.ContextVar[dict] = contextvars.ContextVar("task_context", default=None)
+task_context: contextvars.ContextVar[dict] = contextvars.ContextVar("task_context")
 
 # Setup diagnostic logger for response debugging
 diagnostic_logger = logging.getLogger("diagnostic")
@@ -159,7 +164,7 @@ class HTTPAccessLogger:
             "request_method": context.get("method"),
             "request_path": context.get("path"),
             "duration_ms": self._calculate_duration(
-                context.get("start_time"), timestamp
+                str(context.get("start_time")), timestamp
             ) if context.get("start_time") else None,
         }
 
@@ -372,6 +377,46 @@ def _get_pre_call_data(args: Any, kwargs: Any) -> Dict[str, Any]:
         return {}
 
 
+def _extract_litellm_request(kwargs: Any) -> tuple[Dict[str, Any], List[Any]]:
+    """Extract request payload dict and messages list from LiteLLM logger kwargs."""
+    data: Dict[str, Any] = {}
+    messages: List[Any] = []
+    if not isinstance(kwargs, dict):
+        return data, messages
+    if "messages" in kwargs:
+        messages = kwargs["messages"]
+        data = kwargs
+        logger.debug(f"Found messages directly in kwargs, count: {len(messages)}")
+    elif "litellm_params" in kwargs:
+        litellm_params = kwargs["litellm_params"]
+        messages = litellm_params.get("messages", [])
+        data = litellm_params if isinstance(litellm_params, dict) else {}
+        logger.debug(f"Found messages in litellm_params, count: {len(messages)}")
+    elif "data" in kwargs and isinstance(kwargs["data"], dict):
+        messages = kwargs["data"].get("messages", [])
+        data = kwargs["data"]
+        logger.debug(f"Found messages in data, count: {len(messages)}")
+    else:
+        data = _get_pre_call_data(kwargs, kwargs)
+        messages = data.get("messages", [])
+        logger.debug(f"Found messages via _get_pre_call_data, count: {len(messages)}")
+    return data, messages
+
+
+def _split_system_from_messages(messages: List[Any]) -> tuple[Any, List[Any]]:
+    """Strip leading system message for separate span attribute storage."""
+    messages_for_storage = list(messages)
+    system_message: Any = None
+    if (
+        messages_for_storage
+        and isinstance(messages_for_storage[0], dict)
+        and messages_for_storage[0].get("role") == "system"
+    ):
+        system_message = messages_for_storage[0].get("content")
+        messages_for_storage = messages_for_storage[1:]
+    return system_message, messages_for_storage
+
+
 class RequestSanitizer(CustomLogger):
     """LiteLLM callback to sanitize requests before sending to upstream API.
 
@@ -382,6 +427,8 @@ class RequestSanitizer(CustomLogger):
 
     # Parameters to remove from requests
     SANITIZED_PARAMS = {"tool_choice", "tools", "tool_use", "parallel_tool_calls"}
+
+    callback_name: str
 
     def __init__(self, sanitize_models: Optional[Set[str]] = None):
         """Initialize the request sanitizer.
@@ -476,6 +523,8 @@ class SpanLogger(CustomLogger):
     All captured data is forwarded to a StorageBackend for persistence.
     """
 
+    callback_name: str
+
     def __init__(self, store: StorageBackend):
         """Initialize the span logger.
 
@@ -485,6 +534,29 @@ class SpanLogger(CustomLogger):
         super().__init__()
         self.store = store
         self._current_spans: Dict[str, Dict[str, Any]] = {}
+        self._media_output_dir: Optional[Path] = None
+        output_dir = getattr(store, "output_dir", None)
+        if output_dir is not None:
+            self._media_output_dir = Path(output_dir)
+
+    async def _maybe_externalize_images(
+        self,
+        trace_id: str,
+        span_id: str,
+        messages_for_storage: List[Any],
+        system_message: Any,
+    ) -> tuple[List[Any], Any]:
+        """Replace data-URL images with on-disk JPEG paths relative to the store output dir."""
+        if self._media_output_dir is None:
+            return messages_for_storage, system_message
+        return await asyncio.to_thread(
+            externalize_inline_images_for_span,
+            self._media_output_dir,
+            trace_id,
+            span_id,
+            messages_for_storage,
+            system_message,
+        )
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         """Called when an LLM request succeeds.
@@ -507,45 +579,17 @@ class SpanLogger(CustomLogger):
             logger.debug(f"async_log_success_event kwargs keys: {kwargs.keys() if isinstance(kwargs, dict) else 'not a dict'}")
             logger.debug(f"async_log_success_event response_obj type: {type(response_obj)}")
 
-            # Extract data from kwargs - LiteLLM passes data in different formats
-            # Try multiple ways to get the request data
-            data = {}
-            messages = []
-
-            # Method 1: Check if kwargs has 'messages' directly (common in proxy mode)
-            if isinstance(kwargs, dict):
-                if "messages" in kwargs:
-                    messages = kwargs["messages"]
-                    data = kwargs
-                    logger.debug(f"Found messages directly in kwargs, count: {len(messages)}")
-                # Method 2: Check for standard litellm keys
-                elif "litellm_params" in kwargs:
-                    litellm_params = kwargs["litellm_params"]
-                    messages = litellm_params.get("messages", [])
-                    data = litellm_params
-                    logger.debug(f"Found messages in litellm_params, count: {len(messages)}")
-                # Method 3: Check for 'data' key
-                elif "data" in kwargs and isinstance(kwargs["data"], dict):
-                    messages = kwargs["data"].get("messages", [])
-                    data = kwargs["data"]
-                    logger.debug(f"Found messages in data, count: {len(messages)}")
-                else:
-                    # Fallback to original method
-                    data = _get_pre_call_data(kwargs, kwargs)
-                    messages = data.get("messages", [])
-                    logger.debug(f"Found messages via _get_pre_call_data, count: {len(messages)}")
-
+            data, messages = _extract_litellm_request(kwargs)
             logger.debug(f"Extracted messages: {len(messages)} messages")
 
-            # Extract system prompt (separately identified)
-            system_message = None
-            messages_for_storage = list(messages)  # Make a copy
-
-            if messages_for_storage and messages_for_storage[0].get("role") == "system":
-                system_message = messages_for_storage[0].get("content")
-                # Remove system from messages_for_storage since it's saved separately
-                messages_for_storage = messages_for_storage[1:]
-                logger.debug(f"Extracted system prompt: {len(system_message) if system_message else 0} chars")
+            system_message, messages_for_storage = _split_system_from_messages(messages)
+            if system_message is not None:
+                sys_dbg = (
+                    len(system_message)
+                    if isinstance(system_message, str)
+                    else "multimodal"
+                )
+                logger.debug(f"Extracted system prompt: {sys_dbg}")
 
             # Extract tool results from conversation (separately identified)
             tool_results = None
@@ -564,6 +608,10 @@ class SpanLogger(CustomLogger):
             model = kwargs.get("model", data.get("model", "unknown"))
             span_id = uuid4().hex[:16]
             trace_id = uuid4().hex[:32]
+
+            messages_for_storage, system_message = await self._maybe_externalize_images(
+                trace_id, span_id, messages_for_storage, system_message
+            )
 
             # Build enhanced attributes - only add non-None values
             attributes: Attributes = {
@@ -857,36 +905,16 @@ class SpanLogger(CustomLogger):
             task_id = ctx.get("task_id")
             attempt_id = ctx.get("attempt_id")
             previous_reward = ctx.get("previous_reward")
-            # Extract data from kwargs - same logic as success event
-            data = {}
-            messages = []
-
-            if isinstance(kwargs, dict):
-                if "messages" in kwargs:
-                    messages = kwargs["messages"]
-                    data = kwargs
-                elif "litellm_params" in kwargs:
-                    litellm_params = kwargs["litellm_params"]
-                    messages = litellm_params.get("messages", [])
-                    data = litellm_params
-                elif "data" in kwargs and isinstance(kwargs["data"], dict):
-                    messages = kwargs["data"].get("messages", [])
-                    data = kwargs["data"]
-                else:
-                    data = _get_pre_call_data(kwargs, kwargs)
-                    messages = data.get("messages", [])
-
-            # Extract system prompt (separately identified)
-            system_message = None
-            messages_for_storage = list(messages)
-
-            if messages_for_storage and messages_for_storage[0].get("role") == "system":
-                system_message = messages_for_storage[0].get("content")
-                messages_for_storage = messages_for_storage[1:]
+            data, messages = _extract_litellm_request(kwargs)
+            system_message, messages_for_storage = _split_system_from_messages(messages)
 
             model = kwargs.get("model", data.get("model", "unknown"))
             span_id = uuid4().hex[:16]
             trace_id = uuid4().hex[:32]
+
+            messages_for_storage, system_message = await self._maybe_externalize_images(
+                trace_id, span_id, messages_for_storage, system_message
+            )
 
             attributes: Attributes = {
                 "llm.model": model,
@@ -938,7 +966,7 @@ class LLMProxy:
 
     This class wraps LiteLLM's proxy server with custom logging to capture
     all LLM requests and responses for training data collection.
-    
+
     LiteLLM 使用全局 app，重复 start 只保证不崩，不保证更新中间件配置
 
     Usage:
@@ -953,6 +981,8 @@ class LLMProxy:
         await proxy.start()
         ```
     """
+
+    auth_middleware: Optional[AuthMiddleware]
 
     def __init__(
         self,
@@ -1185,7 +1215,7 @@ class LLMProxy:
             async def dispatch(
                 self,
                 request: StarletteRequest,
-                call_next,
+                call_next: Callable[[StarletteRequest], Awaitable[StarletteResponse]],
             ) -> StarletteResponse:
                 # Extract request info
                 method = request.method
@@ -1219,12 +1249,18 @@ class LLMProxy:
                     except Exception:
                         pass
 
+                log_body = (
+                    redact_data_url_images_in_json_body_for_log(body)
+                    if body and "data:image" in body
+                    else body
+                )
+
                 # Log request
                 request_id = await self.http_logger.log_request(
                     method=method,
                     path=f"{path}?{query}" if query else path,
                     headers=headers,
-                    body=body,
+                    body=log_body,
                 )
 
                 # Process request
@@ -1236,7 +1272,11 @@ class LLMProxy:
                     try:
                         response_body_bytes = response.body
                         if response_body_bytes:
-                            response_body = response_body_bytes.decode("utf-8", errors="replace")
+                            # Convert bytes/memoryview to str
+                            if isinstance(response_body_bytes, memoryview):
+                                response_body = response_body_bytes.tobytes().decode("utf-8", errors="replace")
+                            else:
+                                response_body = response_body_bytes.decode("utf-8", errors="replace")
                     except Exception:
                         pass
 
@@ -1310,7 +1350,24 @@ class LLMProxy:
                     status_code=400
                 )
 
-            stats = await self.task_manager.end_task(task_id)
+            final_reward_raw = body.get("final_reward")
+            if final_reward_raw is None:
+                final_reward_raw = body.get("reward")
+
+            final_reward = None
+            if final_reward_raw is not None:
+                try:
+                    final_reward = float(final_reward_raw)
+                except (TypeError, ValueError):
+                    return JSONResponse(
+                        {
+                            "error": "final_reward (or reward) must be a number",
+                            "task_id": task_id,
+                        },
+                        status_code=400,
+                    )
+
+            stats = await self.task_manager.end_task(task_id, final_reward=final_reward)
             if stats is None:
                 return JSONResponse(
                     {"error": "Task not found", "task_id": task_id},
@@ -1323,6 +1380,7 @@ class LLMProxy:
                     "attempt_count": stats.attempt_count,
                     "total_requests": stats.total_requests,
                     "duration_seconds": stats.duration_seconds,
+                    "final_reward": stats.final_reward,
                 },
                 status_code=200
             )

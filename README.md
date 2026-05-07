@@ -52,13 +52,13 @@ curl http://localhost:43886/tracer-version
 
 #### POST /end_task
 
-结束指定 task 会话。
+结束指定 task 会话。可选传入本轮 **最终 reward**（episode 级别）：优先使用字段 `final_reward`，若省略则用别名 `reward`；二者同时存在时以 `final_reward` 为准。未传入时响应里 `final_reward` 为 `null`。无效数字返回 400。
 
 ```bash
 curl -X POST http://localhost:43886/end_task \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-proxy-key" \
-  -d '{"task_id": "my-task-123"}'
+  -d '{"task_id": "my-task-123", "final_reward": 1.0}'
 ```
 
 ### 环境变量
@@ -137,14 +137,14 @@ Create `config/models.json` with your model configurations:
             "model_name": "gpt-4",
             "litellm_params": {
                 "model": "openai/gpt-4",
-                "api_key": "env:OPENAI_API_KEY"
+                "api_key": "os.environ/OPENAI_API_KEY"
             }
         },
         {
             "model_name": "claude-3-5-sonnet",
             "litellm_params": {
                 "model": "anthropic/claude-3-5-sonnet-20241022",
-                "api_key": "env:ANTHROPIC_API_KEY"
+                "api_key": "os.environ/ANTHROPIC_API_KEY"
             }
         },
         {

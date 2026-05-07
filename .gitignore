@@ -57,3 +57,8 @@ Thumbs.db
 # Project docs / notes (local choice)
 docs/*
 CLAUDE.md
+
+config/models_aitv.json
+
+run.sh
+test.sh

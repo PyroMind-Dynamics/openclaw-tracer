@@ -7,6 +7,7 @@ uvicorn[standard]>=0.38.0       # ASGI server with extras
 # ========== Data Processing ==========
 pyarrow>=18.0.0                 # Parquet file format support
 pandas>=2.2.0                   # Data manipulation and analysis
+Pillow>=10.0.0                  # Image decode / JPEG export for externalized media
 datasets>=3.0.0                 # HuggingFace Datasets library
 
 # ========== Training Support ==========

@@ -85,14 +85,14 @@ docker-compose up -d
             "model_name": "gpt-4",
             "litellm_params": {
                 "model": "openai/gpt-4",
-                "api_key": "env:OPENAI_API_KEY"
+                "api_key": "os.environ/OPENAI_API_KEY"
             }
         },
         {
             "model_name": "claude-3-5-sonnet",
             "litellm_params": {
                 "model": "anthropic/claude-3-5-sonnet-20241022",
-                "api_key": "env:ANTHROPIC_API_KEY"
+                "api_key": "os.environ/ANTHROPIC_API_KEY"
             }
         },
         {

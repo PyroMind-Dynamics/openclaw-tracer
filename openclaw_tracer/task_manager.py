@@ -41,6 +41,8 @@ class TaskStats:
     attempt_count: int
     total_requests: int
     duration_seconds: float
+    final_reward: Optional[float] = None
+    """Episode-level reward supplied when the task was ended, if any."""
 
 
 class TaskManager:
@@ -73,7 +75,9 @@ class TaskManager:
         async with self._lock:
             if task_id is None:
                 # Generate a unique task ID
-                task_id = f"auto-{asyncio.current_task().get_name() if asyncio.current_task() else 'unknown'}-{int(asyncio.get_event_loop().time())}"
+                current_task = asyncio.current_task()
+                task_name = current_task.get_name() if current_task else "unknown"
+                task_id = f"auto-{task_name}-{int(asyncio.get_event_loop().time())}"
 
             state = self._tasks.get(task_id)
             if state is None:
@@ -96,11 +100,14 @@ class TaskManager:
 
             return task_id, attempt_id
 
-    async def end_task(self, task_id: str) -> Optional[TaskStats]:
+    async def end_task(
+        self, task_id: str, final_reward: Optional[float] = None
+    ) -> Optional[TaskStats]:
         """End a task and return its statistics.
 
         Args:
             task_id: The task identifier to end.
+            final_reward: Optional final / episode reward reported by the client.
 
         Returns:
             TaskStats if task existed, None otherwise.
@@ -115,12 +122,16 @@ class TaskManager:
                 attempt_count=state.attempt_count,
                 total_requests=state.total_requests,
                 duration_seconds=state.last_access - state.created_at,
+                final_reward=final_reward,
             )
 
-            logger.info(
+            msg = (
                 f"[TaskManager] Ended task={task_id}, "
                 f"attempts={stats.attempt_count}, requests={stats.total_requests}"
             )
+            if final_reward is not None:
+                msg += f", final_reward={final_reward}"
+            logger.info(msg)
 
             return stats
 
