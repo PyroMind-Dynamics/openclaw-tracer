@@ -239,7 +239,7 @@ class AuthMiddleware:
     """
 
     # Paths that don't require authentication
-    PUBLIC_PATHS = {"/health", "/status", "/v1/models"}
+    PUBLIC_PATHS = {"/health", "/status", "/v1/models", "/tracer-version"}
 
     def __init__(self, api_key: str):
         """Initialize the authentication middleware.
@@ -1278,6 +1278,16 @@ class LLMProxy:
             if hasattr(store, "get_collection_status"):
                 return store.get_collection_status()
             return {"error": "Status not available for this storage backend"}
+
+        @fastapi_app.get("/tracer-version")
+        async def tracer_version():
+            """Return tracer version information (no auth required)."""
+            from openclaw_tracer import __version__
+            return {
+                "name": "openclaw-tracer",
+                "version": __version__,
+                "features": ["task-tracking", "reward-tracking"],
+            }
 
         fastapi_app.state.openclaw_status_route_registered = True
 
