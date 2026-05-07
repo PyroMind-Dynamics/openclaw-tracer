@@ -62,6 +62,7 @@ async def main(
     trajectory_buffer_size: int = 0,
     flush_interval_seconds: int = 1800,
     proxy_api_key: str | None = None,
+    task_timeout_minutes: int = 10,
 ):
     """启动代理服务器
 
@@ -76,6 +77,7 @@ async def main(
         trajectory_buffer_size: 总保留数据条数 (0=不启用分批)
         flush_interval_seconds: 定时 flush 间隔秒数 (默认: 1800 = 30分钟, 0=禁用)
         proxy_api_key: 代理鉴权密钥 (必填，从环境变量 PROXY_API_KEY 读取)
+        task_timeout_minutes: 任务超时分钟数 (默认: 10)
     """
     # 获取并校验 PROXY_API_KEY
     if proxy_api_key is None:
@@ -139,12 +141,15 @@ async def main(
     env_buffer = os.getenv("BUFFER_SIZE")
     env_trajectory = os.getenv("TRAJECTORY_BUFFER_SIZE")
     env_flush_interval = os.getenv("FLUSH_INTERVAL_SECONDS")
+    env_task_timeout = os.getenv("TASK_TIMEOUT_MINUTES")
     if env_buffer:
         buffer_size = int(env_buffer)
     if env_trajectory:
         trajectory_buffer_size = int(env_trajectory)
     if env_flush_interval:
         flush_interval_seconds = int(env_flush_interval)
+    if env_task_timeout:
+        task_timeout_minutes = int(env_task_timeout)
 
     # 校验
     if trajectory_buffer_size > 0:
@@ -180,6 +185,7 @@ async def main(
         store=store,
         log_file=log_file,
         proxy_api_key=proxy_api_key,
+        task_timeout_minutes=task_timeout_minutes,
     )
 
     # 启动
@@ -241,6 +247,8 @@ if __name__ == "__main__":
     parser.add_argument("--flush-interval", type=int, default=1800, dest="flush_interval_seconds",
                         help="定时 flush 间隔秒数 (默认: 1800 = 30分钟, 0=禁用)")
     parser.add_argument("--proxy-api-key", help="代理鉴权密钥 (默认从环境变量 PROXY_API_KEY 读取)")
+    parser.add_argument("--task-timeout-minutes", type=int, default=10,
+                        help="任务超时分钟数 (默认: 10, 可通过环境变量 TASK_TIMEOUT_MINUTES 设置)")
 
     args = parser.parse_args()
 
@@ -255,4 +263,5 @@ if __name__ == "__main__":
         trajectory_buffer_size=args.trajectory_buffer_size,
         flush_interval_seconds=args.flush_interval_seconds,
         proxy_api_key=args.proxy_api_key,
+        task_timeout_minutes=args.task_timeout_minutes,
     ))
