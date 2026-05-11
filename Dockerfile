@@ -52,7 +52,7 @@ COPY openclaw_tracer/ /app/openclaw_tracer/
 COPY scripts/ /app/scripts/
 
 # 创建必要的目录
-RUN mkdir -p /app/config /app/data /app/logs
+RUN mkdir -p /app/config /app/data /app/logs /app/trigger
 
 # 设置工作目录
 WORKDIR /app
