@@ -15,6 +15,58 @@ OpenClaw-Tracer is a lightweight LLM data collection and tracing service for **O
 - **Docker‑friendly deployment**: Simple to run locally or in production with Docker / Docker Compose
 - **Configurable buffering**: Tune buffering for immediate or batched writes depending on your workload
 
+## Task 追踪功能
+
+OpenClaw-Tracer 支持 task 追踪和奖励信号捕获，用于 RL 训练数据收集。
+
+### 请求头
+
+| 请求头 | 类型 | 必填 | 描述 |
+|--------|------|------|------|
+| `X-Task-ID` | string | 否 | 任务标识符，用作 rollout_id |
+| `X-Previous-Reward` | float | 否 | 上一步的奖励值 |
+
+### 示例
+
+```bash
+curl http://localhost:43886/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-proxy-key" \
+  -H "X-Task-ID: my-task-123" \
+  -H "X-Previous-Reward: 0.85" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### API 端点
+
+#### GET /tracer-version
+
+获取 tracer 版本信息（无需认证）。
+
+```bash
+curl http://localhost:43886/tracer-version
+```
+
+#### POST /end_task
+
+结束指定 task 会话。可选传入本轮 **最终 reward**（episode 级别）：优先使用字段 `final_reward`，若省略则用别名 `reward`；二者同时存在时以 `final_reward` 为准。未传入时响应里 `final_reward` 为 `null`。无效数字返回 400。
+
+```bash
+curl -X POST http://localhost:43886/end_task \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-proxy-key" \
+  -d '{"task_id": "my-task-123", "final_reward": 1.0}'
+```
+
+### 环境变量
+
+| 变量 | 默认值 | 描述 |
+|------|--------|------|
+| `TASK_TIMEOUT_MINUTES` | 10 | task 超时时间（分钟） |
+
 ## Architecture
 
 ```
@@ -85,14 +137,14 @@ Create `config/models.json` with your model configurations:
             "model_name": "gpt-4",
             "litellm_params": {
                 "model": "openai/gpt-4",
-                "api_key": "env:OPENAI_API_KEY"
+                "api_key": "os.environ/OPENAI_API_KEY"
             }
         },
         {
             "model_name": "claude-3-5-sonnet",
             "litellm_params": {
                 "model": "anthropic/claude-3-5-sonnet-20241022",
-                "api_key": "env:ANTHROPIC_API_KEY"
+                "api_key": "os.environ/ANTHROPIC_API_KEY"
             }
         },
         {

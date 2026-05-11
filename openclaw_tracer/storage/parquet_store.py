@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import shutil
 import time
 from datetime import datetime, timezone
@@ -21,6 +22,54 @@ from openclaw_tracer.storage.base import StorageBackend
 from openclaw_tracer.types.core import Span
 
 logger = logging.getLogger(__name__)
+
+
+# PyArrow schema for span data with explicit types
+_SPAN_SCHEMA = pa.schema([
+    ("name", pa.string()),
+    ("trace_id", pa.string()),
+    ("span_id", pa.string()),
+    ("parent_id", pa.string()),
+    ("start_time", pa.float64()),
+    ("end_time", pa.float64()),
+    ("kind", pa.string()),
+    ("status", pa.string()),
+    ("attributes", pa.string()),
+    ("rollout_id", pa.string()),
+    ("attempt_id", pa.string()),
+    ("sequence_id", pa.int64()),
+    ("resource_attributes", pa.string()),
+    ("previous_reward", pa.float64()),
+    ("final_reward", pa.float64()),
+])
+
+
+def _ensure_final_reward_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Legacy shards may omit ``final_reward``; fill with NaN for schema alignment."""
+    if "final_reward" not in df.columns:
+        df = df.copy()
+        df["final_reward"] = float("nan")
+    return df
+
+
+def _coerce_stored_final_reward(value: Any) -> Optional[float]:
+    """Parquet float NaN means unset."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        if pd.isna(value):
+            return None
+    except (ValueError, TypeError):
+        pass
+    try:
+        out = float(value)
+        if math.isnan(out):
+            return None
+        return out
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_time_window(interval_minutes: int = 30) -> str:
@@ -119,6 +168,67 @@ class ParquetStore(StorageBackend):
             "spans_flushed": 0,
             "span_files_created": 0,
         }
+
+    def _iter_span_parquet_paths(self) -> List[Path]:
+        """All span shard files under ``output_dir/spans`` (including batch subdirs)."""
+        spans_root = self.output_dir / "spans"
+        if not spans_root.exists():
+            return []
+        paths: List[Path] = []
+        if self._batch_mode:
+            for sub in sorted(spans_root.iterdir(), key=lambda p: p.name):
+                if sub.is_dir() and sub.name.isdigit():
+                    paths.extend(sorted(sub.glob(f"{self.SPAN_PREFIX}*.parquet")))
+        else:
+            paths.extend(sorted(spans_root.glob(f"{self.SPAN_PREFIX}*.parquet")))
+        return paths
+
+    def _rewrite_parquet_final_reward_for_rollout(
+        self, path: Path, rollout_id: str, value: float
+    ) -> bool:
+        """Update ``final_reward`` for all rows with ``rollout_id``. Returns True if file changed."""
+        try:
+            df = pq.read_table(path).to_pandas()
+        except Exception as exc:
+            logger.warning("Skipping parquet %s: %s", path, exc)
+            return False
+        df = _ensure_final_reward_column(df)
+        if "rollout_id" not in df.columns:
+            return False
+        mask = df["rollout_id"].astype(str) == str(rollout_id)
+        if not mask.any():
+            return False
+        df.loc[mask, "final_reward"] = value
+        table = pa.Table.from_pandas(df, schema=_SPAN_SCHEMA, preserve_index=False)
+        pq.write_table(table, path)
+        return True
+
+    async def apply_rollout_final_reward(
+        self, rollout_id: str, final_reward: Optional[float]
+    ) -> None:
+        """Set ``final_reward`` on all spans for ``rollout_id`` (buffer + flushed Parquet shards)."""
+        value = float("nan") if final_reward is None else float(final_reward)
+
+        buffer_updates = 0
+        for row in self._span_buffer:
+            if row.get("rollout_id") == rollout_id:
+                row["final_reward"] = value
+                buffer_updates += 1
+
+        file_updates = 0
+        for path in self._iter_span_parquet_paths():
+            changed = await asyncio.to_thread(
+                self._rewrite_parquet_final_reward_for_rollout, path, rollout_id, value
+            )
+            if changed:
+                file_updates += 1
+
+        logger.info(
+            "[ParquetStore] apply_rollout_final_reward rollout_id=%s buffer_rows=%s parquet_files=%s",
+            rollout_id,
+            buffer_updates,
+            file_updates,
+        )
 
     def _restore_batch_state(self, spans_dir: Path) -> None:
         """Restore batch index and collected count from existing directories on restart."""
@@ -361,9 +471,15 @@ class ParquetStore(StorageBackend):
         # If file exists, append to it (same time window)
         if spans_path.exists():
             existing_df = pq.read_table(spans_path).to_pandas()
+            existing_df = _ensure_final_reward_column(existing_df)
+            df = _ensure_final_reward_column(df)
             df = pd.concat([existing_df, df], ignore_index=True)
 
-        df.to_parquet(spans_path, index=False)
+        df = _ensure_final_reward_column(df)
+
+        # Convert to PyArrow table with explicit schema before writing
+        table = pa.Table.from_pandas(df, schema=_SPAN_SCHEMA, preserve_index=False)
+        pq.write_table(table, spans_path)
         self._stats["spans_flushed"] += len(self._span_buffer)
         if new_window or not spans_path.exists():
             self._stats["span_files_created"] += 1
@@ -429,6 +545,10 @@ class ParquetStore(StorageBackend):
             "attempt_id": span.attempt_id,
             "sequence_id": span.sequence_id,
             "resource_attributes": json.dumps(span.resource.attributes),
+            "previous_reward": span.previous_reward,
+            "final_reward": float("nan")
+            if span.final_reward is None
+            else float(span.final_reward),
         }
 
     def _dict_to_span(self, d: Dict[str, Any]) -> Span:
@@ -456,4 +576,6 @@ class ParquetStore(StorageBackend):
             attempt_id=d["attempt_id"],
             sequence_id=d.get("sequence_id", 0),
             resource=Resource(attributes=json.loads(d.get("resource_attributes", "{}"))),
+            previous_reward=d.get("previous_reward"),
+            final_reward=_coerce_stored_final_reward(d.get("final_reward")),
         )

@@ -1,11 +1,64 @@
+# Runtime / local data
 data/*
 logs/*
-.Dockerfile.swp
-CLAUDE.md
-__pycache__/*
-.cursor/*
-docs/*
-config/models.json
-.DS_Store
+
+# Secrets & local env (tracked templates stay via negation)
 .env
-.env.local
+.env.*
+!.env.example
+
+# Machine-local or large config (use *.example in repo)
+config/models.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+share/python-wheels/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Testing, coverage, linters, type-checking
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Editors & OS
+.Dockerfile.swp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE / assistant local files
+.idea/
+.cursor/*
+.claude/settings.local.json
+
+# Project docs / notes (local choice)
+docs/*
+CLAUDE.md
+
+config/models_aitv.json
+
+run.sh
+test.sh

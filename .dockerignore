@@ -68,3 +68,6 @@ Thumbs.db
 
 # Cursor
 .cursor/
+
+# environments
+.env
