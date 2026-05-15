@@ -1,37 +1,37 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# 获取项目版本
-VERSION="${VERSION:-$(grep '^version' pyproject.toml | head -1 | awk -F'"' '{print $2}')}"
-USERNAME="${DOCKER_USERNAME:-pyrominddynamics}"
-IMAGE_NAME="${USERNAME}/openclaw-tracer"
-PLATFORMS="linux/amd64,linux/arm64"
+# 在项目根目录执行 build（保证 -f Dockerfile 与上下文 . 正确）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT}"
 
-echo "================================"
-echo "Building multi-arch ${IMAGE_NAME}:${VERSION} (nerdctl)"
-echo "Platforms: ${PLATFORMS}"
-echo "================================"
-
-# 推送前需登录镜像仓库（与 docker login 用法一致）
-if ! nerdctl info &>/dev/null; then
-    echo "Warning: nerdctl info failed. Check nerdctl, containerd, and BuildKit."
-    echo "Continuing with build (push will fail if not authenticated)..."
+VERSION="${1:-}"
+if [[ -z "${VERSION}" ]]; then
+    echo "错误: 必须传入镜像版本号参数（必填）。" >&2
+    echo "用法: $0 <版本号>" >&2
+    echo "示例: $0 0.1.5.beta-1" >&2
+    exit 1
 fi
 
-# 使用 nerdctl + BuildKit 构建（无 docker buildx）
-# 多架构推送到仓库时使用: nerdctl build ... --push
-# 仅当前主机加载镜像时，可改为单平台，例如: PLATFORMS=linux/amd64
-nerdctl build \
-  --platform "${PLATFORMS}" \
-  -t "${IMAGE_NAME}:${VERSION}" \
-  -t "${IMAGE_NAME}:latest" \
-  .
+IMAGE="pyrominddynamics/openclaw-tracer:${VERSION}"
+
+run_nerdctl() {
+    if "$@"; then
+        return 0
+    fi
+    echo "命令失败，使用 sudo 重试: $*" >&2
+    sudo "$@"
+}
+
+echo "================================"
+echo "镜像: ${IMAGE}"
+echo "================================"
+
+run_nerdctl nerdctl build -t "${IMAGE}" -f Dockerfile .
+run_nerdctl nerdctl push "${IMAGE}"
 
 echo ""
 echo "================================"
-echo "Built successfully:"
-echo "  - ${IMAGE_NAME}:${VERSION}"
-echo "  - ${IMAGE_NAME}:latest"
-echo ""
-echo "Supported platforms: linux/amd64, linux/arm64"
+echo "构建并推送完成: ${IMAGE}"
 echo "================================"
