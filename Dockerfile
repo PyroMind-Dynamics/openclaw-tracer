@@ -49,12 +49,11 @@ ENV PATH="/opt/conda/envs/openclaw-tracer/bin:$PATH" \
 
 
 
-RUN pip install --no-cache-dir \
-    --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    pyromind-sdk==0.0.24rc10 && \
+RUN pip install --no-cache-dir pyromind-sdk==0.0.25rc1 && \
     python -c "import pyromind_sdk; print(pyromind_sdk.__version__)"
 
+
+    
 
     
 # 复制项目代码
