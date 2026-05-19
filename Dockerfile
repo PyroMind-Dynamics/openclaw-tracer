@@ -49,7 +49,7 @@ ENV PATH="/opt/conda/envs/openclaw-tracer/bin:$PATH" \
 
 
 
-RUN pip install --no-cache-dir pyromind-sdk==0.0.25rc2 && \
+RUN pip install --no-cache-dir pyromind-sdk==0.0.25 && \
     python -c "import pyromind_sdk; print(pyromind_sdk.__version__)"
 
 
