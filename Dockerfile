@@ -47,6 +47,15 @@ ENV PATH="/opt/conda/envs/openclaw-tracer/bin:$PATH" \
 # 代理鉴权密钥 (必填，运行时通过 docker run -e 或 docker-compose 设置)
 # ENV PROXY_API_KEY=your-api-key-here
 
+
+
+RUN pip install --no-cache-dir pyromind-sdk==0.0.25 && \
+    python -c "import pyromind_sdk; print(pyromind_sdk.__version__)"
+
+
+    
+
+    
 # 复制项目代码
 COPY openclaw_tracer/ /app/openclaw_tracer/
 COPY scripts/ /app/scripts/
