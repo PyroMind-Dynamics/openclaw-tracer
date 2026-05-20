@@ -84,5 +84,7 @@ async def run_workflow_trigger(script: Path) -> None:
                 proc.returncode,
                 tail or "(no stderr)",
             )
+        else:
+            logger.info("Workflow trigger script %s exited with code %s", path, proc.returncode)
     except Exception:
         logger.exception("Workflow trigger failed for %s", path)

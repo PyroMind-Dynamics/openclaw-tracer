@@ -1,43 +1,41 @@
 # ============================================
-# Stage 1: Base - 系统依赖
+# Stage 1: Builder - install Python deps into venv
 # ============================================
-FROM continuumio/miniconda3:latest AS base
+FROM python:3.10-slim-bookworm AS builder
+
+WORKDIR /build
+
+# Build deps for wheels that may not have manylinux binaries (pyarrow, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-prod.txt .
+
+RUN python -m venv /venv \
+    && /venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /venv/bin/pip install --no-cache-dir -r requirements-prod.txt \
+    && /venv/bin/python -c "import pyromind_sdk; print('pyromind-sdk', pyromind_sdk.__version__)"
+
+# ============================================
+# Stage 2: Runtime - slim image, no compiler
+# ============================================
+FROM python:3.10-slim-bookworm AS final
 
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖
+# curl: healthcheck; libjpeg/zlib: Pillow image externalization
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    libjpeg62-turbo \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# ============================================
-# Stage 2: Dependencies - Python 环境
-# ============================================
-FROM base AS dependencies
+COPY --from=builder /venv /venv
 
-# 复制依赖文件
-COPY requirements.txt pyproject.toml ./
-
-# 创建 conda 环境
-RUN conda create -n openclaw-tracer python=3.10 -y && \
-    echo "conda activate openclaw-tracer" >> ~/.bashrc
-
-# 设置 shell 为 conda 环境
-SHELL ["conda", "run", "-n", "openclaw-tracer", "/bin/bash", "-c"]
-
-# 升级 pip 并安装依赖
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# ============================================
-# Stage 3: Final - 最终镜像
-# ============================================
-FROM dependencies AS final
-
-# 设置环境变量
-ENV PATH="/opt/conda/envs/openclaw-tracer/bin:$PATH" \
+ENV PATH="/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=43886 \
@@ -47,24 +45,11 @@ ENV PATH="/opt/conda/envs/openclaw-tracer/bin:$PATH" \
 # 代理鉴权密钥 (必填，运行时通过 docker run -e 或 docker-compose 设置)
 # ENV PROXY_API_KEY=your-api-key-here
 
-
-
-RUN pip install --no-cache-dir pyromind-sdk==0.0.25 && \
-    python -c "import pyromind_sdk; print(pyromind_sdk.__version__)"
-
-
-    
-
-    
-# 复制项目代码
 COPY openclaw_tracer/ /app/openclaw_tracer/
 COPY scripts/ /app/scripts/
 
 # 创建必要的目录
 RUN mkdir -p /app/config /app/data /app/logs /app/trigger
-
-# 设置工作目录
-WORKDIR /app
 
 # 暴露端口
 EXPOSE 43886

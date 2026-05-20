@@ -514,7 +514,15 @@ class ParquetStore(StorageBackend):
             self._stats["span_files_created"] += 1
         self._span_buffer.clear()
 
+        if not schedule_workflow and not self._workflow_trigger_enabled:
+            logger.info(f"not schedule_workflow and not self._workflow_trigger_enabled")
+        if schedule_workflow and not self._workflow_trigger_enabled:
+            logger.info(f"schedule_workflow and not self._workflow_trigger_enabled")
+        if not schedule_workflow and self._workflow_trigger_enabled:
+            logger.info(f"not schedule_workflow and self._workflow_trigger_enabled")
         if schedule_workflow and self._workflow_trigger_enabled:
+            logger.info(f"schedule_workflow and self._workflow_trigger_enabled")
+            logger.info(f"Scheduling workflow trigger: {self._workflow_trigger_script_path}")
             schedule_workflow_trigger(self._workflow_trigger_script_path)
 
     def _advance_batch(self) -> None:

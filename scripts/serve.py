@@ -16,6 +16,17 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+import logging
+
+# INFO级别日志透出
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
+    force=True,
+)
+
+
 import openclaw_tracer
 
 
@@ -213,8 +224,11 @@ async def main(
     try:
         # 等待 shutdown_event 或 proxy.wait()
         await asyncio.wait(
-            [_shutdown_event.wait(), proxy.wait()],
-            return_when=asyncio.FIRST_COMPLETED
+            [
+                asyncio.create_task(_shutdown_event.wait()),
+                asyncio.create_task(proxy.wait()),
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
         )
     except KeyboardInterrupt:
         print("\n\n检测到键盘中断...")
