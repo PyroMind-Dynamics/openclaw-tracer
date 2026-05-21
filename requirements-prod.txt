@@ -27,4 +27,4 @@ python-dotenv>=1.0.0
 pyyaml>=6.0.0
 
 # ========== Workflow trigger (optional hook; keep if trigger scripts use SDK) ==========
-pyromind-sdk==0.0.25
+pyromind-sdk==0.0.26rc1
