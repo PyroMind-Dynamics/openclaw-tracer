@@ -299,15 +299,21 @@ class ParquetStore(StorageBackend):
         if self._batch_mode:
             self._current_batch_collected += 1
 
-        # Check if we need to flush (buffer full or time window changed)
+        # Check if we need to flush (buffer full, time window changed, or batch ready)
         current_window = _get_time_window(self.time_window_minutes)
+        batch_ready = self._batch_mode and self._current_batch_collected >= self.buffer_size
         buffer_full_flush = self.auto_flush and len(self._span_buffer) >= self.buffer_size
-        should_flush = buffer_full_flush or current_window != self._current_span_window
+        should_flush = (
+            buffer_full_flush
+            or current_window != self._current_span_window
+            or batch_ready
+        )
+        schedule_workflow = batch_ready or (not self._batch_mode and buffer_full_flush)
 
         if should_flush:
             await self._flush_spans(
                 new_window=current_window != self._current_span_window,
-                schedule_workflow=buffer_full_flush,
+                schedule_workflow=schedule_workflow,
             )
 
     async def add_spans(self, spans: List[Span]) -> None:

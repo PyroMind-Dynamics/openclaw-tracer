@@ -142,6 +142,53 @@ async def test_missing_script_warns_once_per_path(
 
 
 @pytest.mark.asyncio
+async def test_time_window_then_collect_triggers_workflow(
+    tmp_path: Path,
+    sample_span: Span,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Time-window flush splits data across disks; trigger when collected reaches buffer_size."""
+    monkeypatch.setenv("ENABLE_WORKFLOW_TRIGGER", "1")
+    marker = tmp_path / "triggered"
+    script = tmp_path / "start_trigger.sh"
+    script.write_text(f'#!/bin/bash\ntouch "{marker}"\n')
+    script.chmod(0o755)
+
+    state = {"n": 0}
+
+    def next_window(*args: object, **kwargs: object) -> str:
+        n = state["n"]
+        state["n"] += 1
+        return "W0" if n == 0 else "W1"
+
+    with patch(
+        "openclaw_tracer.storage.parquet_store._get_time_window",
+        side_effect=next_window,
+    ):
+        store = ParquetStore(
+            output_dir=tmp_path / "data",
+            buffer_size=4,
+            trajectory_buffer_size=100,
+            workflow_trigger_script=script,
+            enable_workflow_trigger=True,
+            time_window_minutes=5,
+        )
+        # First span: time window flush with 1 record (collected=1, below threshold)
+        await store.add_span(sample_span)
+        assert store._current_batch_collected == 1
+        assert not marker.exists()
+
+        # Spans 2-4: new window, collected reaches buffer_size=4
+        for i in range(1, 4):
+            await store.add_span(_span_with_seq(sample_span, i))
+
+        assert store._current_batch_collected == 4
+        await asyncio.sleep(0.5)
+        assert marker.exists(), "trigger should fire when collected_data_size reaches buffer_size"
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_time_window_flush_does_not_schedule_workflow(
     tmp_path: Path,
     sample_span: Span,
