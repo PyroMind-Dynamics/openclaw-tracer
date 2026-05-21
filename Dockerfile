@@ -27,9 +27,10 @@ FROM python:3.10-slim-bookworm AS final
 # 设置工作目录
 WORKDIR /app
 
-# curl: healthcheck; libjpeg/zlib: Pillow image externalization
+# curl: healthcheck; procps: ps; libjpeg/zlib: Pillow image externalization
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    procps \
     libjpeg62-turbo \
     zlib1g \
     && rm -rf /var/lib/apt/lists/* \
