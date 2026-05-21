@@ -12,11 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements-prod.txt .
 
+
+
 RUN python -m venv /venv \
     && /venv/bin/pip install --no-cache-dir --upgrade pip \
     && /venv/bin/pip install --no-cache-dir -r requirements-prod.txt \
-    && /venv/bin/python -c "import pyromind_sdk; print('pyromind-sdk', pyromind_sdk.__version__)"
-
+    && /venv/bin/pip install --no-cache-dir "pyromind-sdk==0.0.26rc1"
+    
 # ============================================
 # Stage 2: Runtime - slim image, no compiler
 # ============================================
