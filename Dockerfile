@@ -17,7 +17,7 @@ COPY requirements-prod.txt .
 RUN python -m venv /venv \
     && /venv/bin/pip install --no-cache-dir --upgrade pip \
     && /venv/bin/pip install --no-cache-dir -r requirements-prod.txt \
-    && /venv/bin/pip install --no-cache-dir "pyromind-sdk==0.0.26rc1"
+    && /venv/bin/pip install --no-cache-dir "pyromind-sdk==0.1.2"
     
 # ============================================
 # Stage 2: Runtime - slim image, no compiler
