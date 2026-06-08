@@ -1,0 +1,29 @@
+# Production dependencies for Docker / serve.py (proxy + parquet storage).
+# Local dev, export CLI, training stack, and tests: pip install -r requirements.txt
+
+# ========== Core (proxy server) ==========
+litellm[proxy]>=1.74.0
+pydantic>=2.11.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.38.0
+
+# ========== Data processing ==========
+pyarrow>=18.0.0
+pandas>=2.2.0
+Pillow>=10.0.0
+
+# ========== Observability ==========
+opentelemetry-api>=1.35.0
+opentelemetry-sdk>=1.35.0
+
+# ========== Async & networking ==========
+aiohttp>=3.11.0
+httpx>=0.28.0
+
+# ========== Utilities ==========
+click>=8.1.0
+rich>=13.9.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+
+# pyromind-sdk: pinned in Dockerfile (ARG PYROMIND_SDK_VERSION), not here — avoids duplicate pins

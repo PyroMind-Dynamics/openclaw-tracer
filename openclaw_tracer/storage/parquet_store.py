@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import shutil
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,10 @@ from pydantic import BaseModel
 
 from openclaw_tracer.storage.base import StorageBackend
 from openclaw_tracer.types.core import Span
+from openclaw_tracer.workflow_trigger import (
+    resolve_workflow_script_path,
+    schedule_workflow_trigger,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +122,8 @@ class ParquetStore(StorageBackend):
         time_window_minutes: int = 5,
         trajectory_buffer_size: int = 0,
         flush_interval_seconds: int = 1800,
+        enable_workflow_trigger: bool | None = None,
+        workflow_trigger_script: str | Path | None = None,
     ):
         """Initialize the Parquet store.
 
@@ -128,6 +135,10 @@ class ParquetStore(StorageBackend):
             trajectory_buffer_size: Total records to retain (rolling window). 0 = disabled.
             flush_interval_seconds: Periodic flush interval in seconds (default: 1800 = 30min).
                                     0 = disabled.
+            enable_workflow_trigger: If set, enables/disables post-flush workflow hook; if None,
+                uses ENABLE_WORKFLOW_TRIGGER env (default on unless 0/false/no/off).
+            workflow_trigger_script: Absolute path to shell script; None uses WORKFLOW_TRIGGER_SCRIPT
+                env or /app/trigger/start_trigger.sh.
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +179,16 @@ class ParquetStore(StorageBackend):
             "spans_flushed": 0,
             "span_files_created": 0,
         }
+
+        if enable_workflow_trigger is not None:
+            self._workflow_trigger_enabled = enable_workflow_trigger
+        else:
+            ev = os.getenv("ENABLE_WORKFLOW_TRIGGER", "1").strip().lower()
+            self._workflow_trigger_enabled = ev not in ("0", "false", "no", "off")
+
+        self._workflow_trigger_script_path = resolve_workflow_script_path(
+            workflow_trigger_script
+        )
 
     def _iter_span_parquet_paths(self) -> List[Path]:
         """All span shard files under ``output_dir/spans`` (including batch subdirs)."""
@@ -278,14 +299,22 @@ class ParquetStore(StorageBackend):
         if self._batch_mode:
             self._current_batch_collected += 1
 
-        # Check if we need to flush (buffer full or time window changed)
+        # Check if we need to flush (buffer full, time window changed, or batch ready)
         current_window = _get_time_window(self.time_window_minutes)
+        batch_ready = self._batch_mode and self._current_batch_collected >= self.buffer_size
+        buffer_full_flush = self.auto_flush and len(self._span_buffer) >= self.buffer_size
         should_flush = (
-            self.auto_flush and len(self._span_buffer) >= self.buffer_size
-        ) or current_window != self._current_span_window
+            buffer_full_flush
+            or current_window != self._current_span_window
+            or batch_ready
+        )
+        schedule_workflow = batch_ready or (not self._batch_mode and buffer_full_flush)
 
         if should_flush:
-            await self._flush_spans(new_window=current_window != self._current_span_window)
+            await self._flush_spans(
+                new_window=current_window != self._current_span_window,
+                schedule_workflow=schedule_workflow,
+            )
 
     async def add_spans(self, spans: List[Span]) -> None:
         """Add multiple spans to storage."""
@@ -296,12 +325,14 @@ class ParquetStore(StorageBackend):
 
         # Check if we need to flush
         current_window = _get_time_window(self.time_window_minutes)
-        should_flush = (
-            self.auto_flush and len(self._span_buffer) >= self.buffer_size
-        ) or current_window != self._current_span_window
+        buffer_full_flush = self.auto_flush and len(self._span_buffer) >= self.buffer_size
+        should_flush = buffer_full_flush or current_window != self._current_span_window
 
         if should_flush:
-            await self._flush_spans(new_window=current_window != self._current_span_window)
+            await self._flush_spans(
+                new_window=current_window != self._current_span_window,
+                schedule_workflow=buffer_full_flush,
+            )
 
     async def query_spans(
         self,
@@ -379,7 +410,10 @@ class ParquetStore(StorageBackend):
     async def flush(self) -> None:
         """Flush all buffered data to storage."""
         current_window = _get_time_window(self.time_window_minutes)
-        await self._flush_spans(new_window=current_window != self._current_span_window)
+        await self._flush_spans(
+            new_window=current_window != self._current_span_window,
+            schedule_workflow=False,
+        )
 
     async def close(self) -> None:
         """Close the storage backend."""
@@ -443,11 +477,12 @@ class ParquetStore(StorageBackend):
 
     # ========== Private Helper Methods ==========
 
-    async def _flush_spans(self, new_window: bool = False) -> None:
+    async def _flush_spans(self, new_window: bool = False, *, schedule_workflow: bool = False) -> None:
         """Flush buffered spans to Parquet file.
 
         Args:
             new_window: Whether the time window has changed (creates new file).
+            schedule_workflow: If True, spawn workflow trigger after successful write (buffer-full flush).
         """
         if not self._span_buffer:
             return
@@ -484,6 +519,17 @@ class ParquetStore(StorageBackend):
         if new_window or not spans_path.exists():
             self._stats["span_files_created"] += 1
         self._span_buffer.clear()
+
+        if not schedule_workflow and not self._workflow_trigger_enabled:
+            logger.info(f"not schedule_workflow and not self._workflow_trigger_enabled")
+        if schedule_workflow and not self._workflow_trigger_enabled:
+            logger.info(f"schedule_workflow and not self._workflow_trigger_enabled")
+        if not schedule_workflow and self._workflow_trigger_enabled:
+            logger.info(f"not schedule_workflow and self._workflow_trigger_enabled")
+        if schedule_workflow and self._workflow_trigger_enabled:
+            logger.info(f"schedule_workflow and self._workflow_trigger_enabled")
+            logger.info(f"Scheduling workflow trigger: {self._workflow_trigger_script_path}")
+            schedule_workflow_trigger(self._workflow_trigger_script_path)
 
     def _advance_batch(self) -> None:
         """Advance to the next batch directory and delete old batches if needed.

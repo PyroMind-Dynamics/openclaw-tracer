@@ -40,7 +40,7 @@ def resource() -> Resource:
     return Resource(
         attributes={
             "service.name": "openclaw-tracer",
-            "service.version": "0.1.2",
+            "service.version": "0.1.4",
         }
     )
 

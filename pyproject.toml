@@ -1,6 +1,6 @@
 [project]
 name = "openclaw-tracer"
-version = "0.1.2"
+version = "0.1.5"
 description = "LLM data collection tool for SFT and RL training using LiteLLM proxy"
 readme = "README.md"
 requires-python = ">=3.10"
