@@ -11,7 +11,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WORKFLOW_TRIGGER_SCRIPT = Path("/app/trigger/start_trigger.sh")
+DEFAULT_WORKFLOW_TRIGGER_SCRIPT = Path("/app/trigger/test.sh")
 
 _warned_missing_lock = threading.Lock()
 _warned_missing_paths: set[str] = set()
